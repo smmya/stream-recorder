@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  stream-recorder:
+    build: .
+    image: stream-recorder:latest
+    container_name: stream-recorder
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./recordings:/app/recordings   # 录制文件持久化
+      - ./config.yaml:/app/config.yaml # 配置文件映射（方便修改）
+      - ./logs:/app/logs               # 日志持久化
+    command: ["--test"]                 # Docker 环境需要监听 0.0.0.0
+    restart: unless-stopped
+    # 如果服务器时区不对，取消下面注释：
+    # environment:
+    #   - TZ=Asia/Shanghai

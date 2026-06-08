@@ -1,0 +1,17 @@
+[Unit]
+Description=流媒体自动录制系统
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/stream-recorder
+ExecStart=/usr/bin/python3 /opt/stream-recorder/main.py
+ExecStop=/bin/kill -SIGTERM $MAINPID
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

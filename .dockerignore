@@ -1,0 +1,13 @@
+__pycache__
+*.pyc
+.env
+.workbuddy
+logs/
+recordings/
+*.bat
+*.sh
+.git
+*.md
+docker-compose.yml
+Dockerfile
+.dockerignore
