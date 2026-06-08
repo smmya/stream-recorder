@@ -237,6 +237,7 @@
         <button class="tab" onclick="switchTab('recordings')">📁 录制文件</button>
         <button class="tab" onclick="switchTab('subscriptions')">🔴 RTMP 订阅</button>
         <button class="tab" onclick="switchTab('settings')">⚙️ 系统设置</button>
+        <button class="tab" onclick="switchTab('logs')">📋 系统日志</button>
     </div>
 
     <!-- 内容区 -->
@@ -268,9 +269,10 @@
                     <button class="btn-sm primary" onclick="openSourceModal()">+ 添加流源</button>
                 </div>
                 <table>
-                    <thead><tr><th>名称</th><th>类型</th><th>API 地址</th><th>RTMP 基地址</th><th>操作</th></tr></thead>
+                    <thead><tr><th>名称</th><th>类型</th><th>API 地址</th><th>间隔</th><th>时段</th><th>操作</th></tr></thead>
                     <tbody id="sourcesTableBody"></tbody>
                 </table>
+                <div id="sourceTestResult" style="display:none;margin-top:12px;padding:10px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:13px;"></div>
                 <div id="sourcesEmpty" class="empty-state" style="display:none;"><div class="icon">🔗</div><p>还没有配置流源，点击"添加流源"开始</p></div>
             </div>
         </div>
@@ -393,10 +395,60 @@
                 <div id="recDirTestResult" style="font-size:12px;margin-top:6px;"></div>
             </div>
             <div class="card">
+                <div class="card-header"><h3>📝 日志设置</h3></div>
+                <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                    <div style="flex:1;min-width:150px;">
+                        <label>文件日志级别</label>
+                        <select id="settingLogLevel" style="width:100%;padding:8px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);">
+                            <option value="INFO">INFO（全部）</option>
+                            <option value="WARNING">WARNING（警告及以上）</option>
+                            <option value="ERROR">ERROR（仅错误）</option>
+                        </select>
+                    </div>
+                    <div style="flex:1;min-width:120px;">
+                        <label>单文件最大 (MB)</label>
+                        <input type="number" id="settingLogSize" min="1" max="500" placeholder="10" style="width:100%;padding:8px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);">
+                    </div>
+                    <div style="flex:1;min-width:120px;">
+                        <label>备份数量</label>
+                        <input type="number" id="settingLogBackup" min="1" max="30" placeholder="5" style="width:100%;padding:8px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);">
+                    </div>
+                </div>
+                <p style="font-size:11px;color:var(--text-secondary);margin:8px 0;">录制开始/结束/新流检测始终记录（WARNING 级别），不受日志级��限制</p>
+                <button class="btn-sm primary" onclick="updateLogConfig()">保存日志设置</button>
+            </div>
+            <div class="card">
                 <div class="card-header"><h3>轮询设置</h3></div>
                 <label>轮询间隔（秒）</label>
                 <input type="number" id="settingInterval" min="3" max="300" placeholder="轮询间隔">
                 <button class="btn-sm primary" onclick="updateInterval()" style="margin-top:12px;">保存间隔</button>
+            </div>
+        </div>
+
+        <!-- 系统日志 -->
+        <div class="tab-content" id="tab-logs">
+            <div class="card">
+                <div class="card-header">
+                    <h3>📋 系统日志</h3>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <select id="logLevel" onchange="loadLogs()" style="padding:5px 10px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:13px;">
+                            <option value="">全部级别</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                        </select>
+                        <input type="text" id="logSearch" placeholder="搜索关键词..." oninput="loadLogs()" style="padding:5px 10px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:13px;width:160px;">
+                        <button class="btn-sm primary" onclick="loadLogs()">🔄 刷新</button>
+                        <a href="/api/logs/download" class="btn-sm" style="text-decoration:none;">⬇ 下载</a>
+                        <label style="font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:4px;">
+                            <input type="checkbox" id="logAutoRefresh" checked onchange="toggleLogAutoRefresh()" style="width:auto;margin:0;"> 自动刷新
+                        </label>
+                    </div>
+                </div>
+                <div id="logContainer" style="background:#0a0c14;border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;max-height:60vh;overflow-y:auto;font-family:'JetBrains Mono','Fira Code',Consolas,monospace;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-all;">
+                    <div class="empty-state"><div class="icon">📋</div><p>加载日志中...</p></div>
+                </div>
+                <div style="margin-top:8px;font-size:11px;color:var(--text-secondary);text-align:right;" id="logCounter">-</div>
             </div>
         </div>
 
@@ -419,6 +471,12 @@
         <input type="text" id="sourceApiUrl" placeholder="SRS: http://ip:1985/api/v1/streams  |  Nginx: http://ip:8080/stat">
         <label>RTMP 基地址（用于拼接录制源）</label>
         <input type="text" id="sourceRtmpBase" placeholder="例如：rtmp://192.168.1.100/live/">
+        <label>轮询间隔（秒，留空使用全局间隔）</label>
+        <input type="number" id="sourcePollInterval" placeholder="留空则使用全局间隔" min="1" max="3600">
+        <label>轮询开始时间（留空 = 全天）</label>
+        <input type="text" id="sourcePollStart" placeholder="例如：08:00">
+        <label>轮询结束时间（留空 = 全天）</label>
+        <input type="text" id="sourcePollEnd" placeholder="例如：22:00">
         <div class="btn-row">
             <button class="btn-sm" onclick="closeSourceModal()">取消</button>
             <button class="btn-sm primary" onclick="saveSource()">保存</button>
@@ -608,7 +666,7 @@ function switchTab(name) {
     document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
     // 激活对应的标签按钮
     document.querySelectorAll('.tab').forEach(t => {
-        if (t.textContent.includes({dashboard:'仪表盘',sources:'流源管理',subscriptions:'RTMP 订阅',status:'实时状态',recordings:'录制文件',settings:'系统设置'}[name])) {
+        if (t.textContent.includes({dashboard:'仪表盘',sources:'流源管理',subscriptions:'RTMP 订阅',status:'实时状态',recordings:'录制文件',logs:'系统日志',settings:'系统设置'}[name])) {
             t.classList.add('active');
         }
     });
@@ -620,6 +678,7 @@ function switchTab(name) {
     else if (name === 'status') refreshStatus();
     else if (name === 'recordings') loadRecordings();
     else if (name === 'settings') loadSettings();
+    else if (name === 'logs') loadLogs();
 }
 
 // ==================== 仪表盘 ====================
@@ -678,9 +737,11 @@ async function loadSources() {
                 <tr>
                     <td><strong>${escHtml(s.name)}</strong></td>
                     <td><span class="badge ${s.type === 'nginx-rtmp' ? 'nginx' : 'srs'}">${s.type}</span></td>
-                    <td class="mono" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(s.api_url)}">${escHtml(s.api_url)}</td>
-                    <td class="mono">${escHtml(s.rtmp_base || '-')}</td>
+                    <td class="mono" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(s.api_url)}">${escHtml(s.api_url)}</td>
+                    <td>${s.poll_interval ? s.poll_interval + 's' : '<span style="color:var(--text-secondary)">全局</span>'}</td>
+                    <td>${s.poll_start || s.poll_end ? (s.poll_start||'00:00') + '~' + (s.poll_end||'24:00') : '<span style="color:var(--text-secondary)">全天</span>'}</td>
                     <td>
+                        <button class="btn-sm" onclick="testSource(${i})">测试</button>
                         <button class="btn-sm" onclick="editSource(${i})">编辑</button>
                         <button class="btn-sm danger" onclick="deleteSource(${i})">删除</button>
                     </td>
@@ -700,6 +761,9 @@ function openSourceModal(editId = -1) {
         document.getElementById('sourceType').value = 'srs';
         document.getElementById('sourceApiUrl').value = '';
         document.getElementById('sourceRtmpBase').value = '';
+        document.getElementById('sourcePollInterval').value = '';
+        document.getElementById('sourcePollStart').value = '';
+        document.getElementById('sourcePollEnd').value = '';
     }
     document.getElementById('sourceModal').classList.add('active');
 }
@@ -716,6 +780,9 @@ async function editSource(id) {
     document.getElementById('sourceType').value = s.type;
     document.getElementById('sourceApiUrl').value = s.api_url;
     document.getElementById('sourceRtmpBase').value = s.rtmp_base || '';
+    document.getElementById('sourcePollInterval').value = s.poll_interval || '';
+    document.getElementById('sourcePollStart').value = s.poll_start || '';
+    document.getElementById('sourcePollEnd').value = s.poll_end || '';
     document.getElementById('sourceModalTitle').textContent = '编辑流源';
     document.getElementById('sourceModal').classList.add('active');
 }
@@ -727,6 +794,9 @@ async function saveSource() {
         type: document.getElementById('sourceType').value,
         api_url: document.getElementById('sourceApiUrl').value.trim(),
         rtmp_base: document.getElementById('sourceRtmpBase').value.trim(),
+        poll_interval: parseInt(document.getElementById('sourcePollInterval').value) || null,
+        poll_start: document.getElementById('sourcePollStart').value.trim(),
+        poll_end: document.getElementById('sourcePollEnd').value.trim(),
     };
     if (!body.name) { showToast('请输入流源名称', 'error'); return; }
     if (!body.api_url) { showToast('请输入 API 地址', 'error'); return; }
@@ -750,6 +820,21 @@ async function deleteSource(id) {
         loadSources();
         showToast('已删除');
     } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function testSource(id) {
+    const resultEl = document.getElementById('sourceTestResult');
+    resultEl.style.display = 'block';
+    resultEl.innerHTML = '<span style="color:var(--text-secondary);">⏳ 正在测试...</span>';
+    try {
+        const data = await api('POST', `/api/sources/${id}/test`);
+        const streamsHtml = data.streams.length > 0
+            ? `<br>活跃流: ${data.streams.map(s => `<br>&nbsp;&nbsp;├ ${escHtml(s.stream_name)} (${escHtml(s.resolution || 'N/A')} ${s.video_codec})`).join('')}`
+            : '<br>暂无活跃流';
+        resultEl.innerHTML = `<span style="color:var(--green);">✅ 连接成功 | ${data.source_type} | ${data.stream_count} 个活跃流</span>${streamsHtml}`;
+    } catch (e) {
+        resultEl.innerHTML = `<span style="color:var(--red);">❌ ${escHtml(e.message)}</span>`;
+    }
 }
 
 // ==================== RTMP 直接订阅管理 ====================
@@ -977,6 +1062,9 @@ async function loadSettings() {
         const cfg = await api('GET', '/api/config');
         document.getElementById('settingWebPort').value = cfg.port;
         document.getElementById('settingRecDir').value = cfg.recording_dir;
+        document.getElementById('settingLogLevel').value = cfg.log_level || 'INFO';
+        document.getElementById('settingLogSize').value = cfg.log_max_size_mb || 10;
+        document.getElementById('settingLogBackup').value = cfg.log_backup_count || 5;
     } catch (e) {}
     loadSecurityStatus();
 }
@@ -1171,6 +1259,58 @@ async function updateInterval() {
         await api('PUT', '/api/polling/interval', { interval });
         showToast('轮询间隔已更新');
     } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function updateLogConfig() {
+    const body = {
+        file_level: document.getElementById('settingLogLevel').value,
+        max_size_mb: parseInt(document.getElementById('settingLogSize').value) || 10,
+        backup_count: parseInt(document.getElementById('settingLogBackup').value) || 5,
+    };
+    try {
+        await api('PUT', '/api/config/logging', body);
+        showToast('日志设置已保存（即时生效）');
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+// ==================== 日志查看 ====================
+let logRefreshTimer = null;
+
+async function loadLogs() {
+    try {
+        const level = document.getElementById('logLevel').value;
+        const search = document.getElementById('logSearch').value;
+        const params = new URLSearchParams({ limit: 500 });
+        if (level) params.set('level', level);
+        if (search) params.set('search', search);
+
+        const data = await api('GET', `/api/logs?${params}`);
+        const container = document.getElementById('logContainer');
+        const counter = document.getElementById('logCounter');
+        counter.textContent = `共 ${data.total} 条`;
+
+        if (data.logs.length === 0) {
+            container.innerHTML = '<div class="empty-state"><div class="icon">📋</div><p>暂无匹配日志</p></div>';
+            return;
+        }
+
+        const levelColors = { ERROR: '#f87171', WARNING: '#fbbf24', INFO: '#4f8cff', DEBUG: '#8b8fa3' };
+        container.innerHTML = data.logs.map(l => {
+            const color = levelColors[l.level] || '#e0e0e0';
+            return `<span style="color:#8b8fa3;">${l.time}</span> <span style="color:${color};font-weight:600;">[${l.level}]</span> <span style="color:#e0e0e0;">${escHtml(l.message)}</span>`;
+        }).join('\n');
+        container.scrollTop = container.scrollHeight;
+    } catch (e) {}
+}
+
+function toggleLogAutoRefresh() {
+    const checked = document.getElementById('logAutoRefresh').checked;
+    if (checked) {
+        logRefreshTimer = setInterval(loadLogs, 3000);
+    } else {
+        clearInterval(logRefreshTimer);
+        logRefreshTimer = null;
+    }
 }
 
 // ==================== 轮询状态刷新 ====================

@@ -1,69 +1,39 @@
-# ============================================
-# 流媒体自动录制系统 - 配置文件
-# ============================================
-
-# 登录认证
 auth:
-  username: admin
+  _pending_totp_secret: 2MRMTXEXB5M25FWRABYNFYH2VQVWN6ME
   password: admin123
-
-# 安全配置
-security:
-  max_failed_attempts: 5        # IP 最大登录失败次数
-  ban_duration_minutes: 15      # 封禁时长（分钟）
-  totp_enabled: false           # 全局 TOTP 二次验证（每个用户可单独启用）
-
-# 录制脚本钩子（全局，所有流默认执行）
+  username: admin
 hooks:
-  on_recording_start: ""    # 录制开始时执行的 shell 命令，如留空则不执行
-  on_recording_stop: ""     # 录制停止时执行的 shell 命令，如留空则不执行
-  # 可用变量: {stream_name} {source_url} {source_name} {filename} {output_file}
-  #           {remarks} {record_type} {start_time} {stop_time}
-  # 注意: 如果流配置了专用脚本，则优先执行专用脚本，不再执行全局脚本
-
-# 轮询配置
+  on_recording_start: ''
+  on_recording_stop: ''
+logging:
+  backup_count: 10
+  file_level: WARNING
+  max_size_mb: 10
 polling:
-  interval: 10          # 轮询间隔（秒）
-  enabled_on_start: true # 启动时是否自动开始轮询
-
-# 流源列表（可配置多组 SRS / nginx-rtmp）
-stream_sources:
-  # SRS 示例
-  - name: "SRS 演示服务器"
-    type: srs                           # srs 或 nginx-rtmp
-    api_url: "http://127.0.0.1:1985/api/v1/streams"  # SRS HTTP API 地址
-    rtmp_base: "rtmp://127.0.0.1/live/" # RTMP 基地址（用于拼接录制源）
-
-  # nginx-rtmp 示例
-  - name: "Nginx-RTMP 服务器"
-    type: nginx-rtmp
-    api_url: "http://127.0.0.1:8080/stat"  # nginx-rtmp stat 页面地址
-    rtmp_base: "rtmp://127.0.0.1/live/"    # RTMP 基地址
-
-# RTMP 直接订阅列表（每个地址 = 一个独立流任务）
-rtmp_subscriptions: []
-# 示例：
-#   - url: "rtmp://192.168.1.100/live/cam1"
-#     remarks: "前门摄像头"
-#     enabled: true
-#     poll_start: "08:00"
-#     poll_end: "22:00"
-#     poll_interval: 30
-#     probe_timeout: 5
-#     hooks:                 # 专用脚本（优先级高于全局），可选
-#       on_start: "curl -X POST http://api.example.com/notify?stream={stream_name}&action=start"
-#       on_stop: "curl -X POST http://api.example.com/notify?stream={stream_name}&action=stop"
-
-# 录制配置
+  enabled_on_start: true
+  interval: 10
 recording:
-  output_dir: "./recordings"   # 录制文件输出目录
-  ffmpeg_path: "ffmpeg"        # FFmpeg 可执行文件路径
-  ffprobe_path: "ffprobe"      # FFprobe 可执行文件路径（用于探测 RTMP 流）
-  # FFmpeg 录制参数（可根据需要调整）
-  ffmpeg_args: "-c copy -f mp4"
-
-# 服务配置
+  ffmpeg_args: -c copy -f mp4
+  ffmpeg_path: ffmpeg
+  ffprobe_path: ffprobe
+  output_dir: ./recordings
+rtmp_subscriptions: []
+security:
+  ban_duration_minutes: 15
+  max_failed_attempts: 5
+  totp_enabled: false
 server:
-  host: "127.0.0.1"  # 默认仅本地访问（安全），使用 --test 参数可监听 0.0.0.0
+  host: 127.0.0.1
   port: 5000
-  secret_key: "change-me-to-a-random-string"
+  secret_key: change-me-to-a-random-string
+stream_sources:
+- _id: 0
+  api_url: http://127.0.0.1:1985/api/v1/streams
+  name: SRS 演示服务器
+  rtmp_base: rtmp://127.0.0.1/live/
+  type: srs
+- _id: 1
+  api_url: http://127.0.0.1:8080/stat
+  name: Nginx-RTMP 服务器
+  rtmp_base: rtmp://127.0.0.1/live/
+  type: nginx-rtmp

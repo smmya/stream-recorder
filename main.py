@@ -1,20 +1,23 @@
 """
-流媒体自动录制系统 v2.1
+流媒体自动录制系统 v2.5
 支持 SRS / nginx-rtmp API 多源轮询 + 直接 RTMP/RTMPS 订阅
-FFmpeg 自动录制 · 时间段控制 · 录制期间暂停轮询 · TOTP 零信任登录 · IP 封禁
+FFmpeg 自动录制 · 时间段控制 · 录制期间暂停轮询 · TOTP 零信任登录 · IP 封禁 · 日志系统
 """
 import asyncio
 import base64
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import signal
 import sys
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta
+from collections import deque
+from datetime import datetime, timedelta, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
@@ -23,11 +26,103 @@ import aiohttp
 import pyotp
 import qrcode
 import yaml
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
+
+# ============================================
+# 日志系统
+# ============================================
+
+
+class RingBufferHandler(logging.Handler):
+    """内存环形缓冲区日志处理器，保存最近 N 条日志供 Web 查看"""
+
+    def __init__(self, capacity: int = 2000):
+        super().__init__()
+        self.buffer = deque(maxlen=capacity)
+        self.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"))
+
+    def emit(self, record):
+        self.buffer.append({
+            "time": self.formatter.formatTime(record, self.formatter.default_time_format),
+            "level": record.levelname,
+            "name": record.name,
+            "message": self.format(record),
+            "levelno": record.levelno,
+        })
+
+    def get_logs(self, level: str = None, limit: int = 200, search: str = None):
+        """获取缓冲日志，支持级别筛选和搜索"""
+        records = list(self.buffer)
+        if level:
+            levelno = getattr(logging, level.upper(), 0)
+            records = [r for r in records if r["levelno"] >= levelno]
+        if search:
+            search_lower = search.lower()
+            records = [r for r in records if search_lower in r["message"].lower()]
+        return list(reversed(records))[-limit:]
+
+
+def setup_logging():
+    """配置日志系统：文件滚动日志（可配置级别+大小+切割） + 内存环形缓冲"""
+    log_dir = BASE_DIR / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    log_cfg = config.get("logging", {})
+    file_level_str = log_cfg.get("file_level", "INFO").upper()
+    file_level = getattr(logging, file_level_str, logging.INFO)
+    max_bytes = (log_cfg.get("max_size_mb", 10) or 10) * 1024 * 1024
+    backup_count = log_cfg.get("backup_count", 5) or 5
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)  # 根 logger 保持 INFO，各 handler 自己过滤
+
+    # 清除已有的 handler（避免重复）
+    root_logger.handlers.clear()
+
+    # 控制台输出（始终 INFO）
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    console.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
+    root_logger.addHandler(console)
+
+    # 文件滚动日志（级别、大小、备份数可配置）
+    global file_handler_ref
+    file_handler_ref = RotatingFileHandler(
+        log_dir / "app.log", maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8",
+    )
+    file_handler_ref.setLevel(file_level)
+    file_handler_ref.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-7s | %(name)-15s | %(message)s"))
+    root_logger.addHandler(file_handler_ref)
+
+    # 内存环形缓冲区（始终 INFO，Web 查看用）
+    global ring_handler
+    ring_handler = RingBufferHandler(capacity=2000)
+    root_logger.addHandler(ring_handler)
+
+    return logging.getLogger("app")
+
+
+ring_handler: RingBufferHandler = None
+file_handler_ref: RotatingFileHandler = None
+logger = None  # 将在 setup_logging() 调用后初始化
+
+
+def reconfigure_logging():
+    """动态重配置日志：文件级别、大小、备份数变更后调用"""
+    log_cfg = config.get("logging", {})
+    file_level_str = log_cfg.get("file_level", "INFO").upper()
+    file_level = getattr(logging, file_level_str, logging.INFO)
+    max_bytes = (log_cfg.get("max_size_mb", 10) or 10) * 1024 * 1024
+    backup_count = log_cfg.get("backup_count", 5) or 5
+
+    if file_handler_ref:
+        file_handler_ref.setLevel(file_level)
+        # RotatingFileHandler 不支持动态修改 maxBytes/backupCount，但下次创建时会生效
+        logger.info(f"日志配置更新: 级别={file_level_str}, 大小={log_cfg.get('max_size_mb', 10)}MB, 备份={backup_count}")
 
 # ============================================
 # 配置加载
@@ -47,6 +142,7 @@ def save_config(config):
 
 
 config = load_config()
+logger = setup_logging()  # 初始化日志系统
 
 SECRET_KEY = config["server"].get("secret_key", "default-secret")
 TOKEN_EXPIRE_HOURS = 24
@@ -71,6 +167,8 @@ active_recordings: dict = {}
 paused_subscriptions: set = set()
 # 每个 RTMP 订阅的上次轮询时间: {subscription_key: datetime}
 last_poll_times: dict = {}
+# 每个 API 流源的上次轮询时间: {source_name: datetime}
+last_source_poll_times: dict = {}
 polling_task: Optional[asyncio.Task] = None
 polling_running = False
 
@@ -124,7 +222,7 @@ def record_failed_login(ip: str):
     info["last_attempt"] = datetime.now()
     if info["attempts"] >= max_attempts:
         info["banned_until"] = datetime.now() + timedelta(minutes=ban_minutes)
-        print(f"[安全] IP {ip} 被封禁 {ban_minutes} 分钟（失败 {info['attempts']} 次）")
+        logger.warning(f"[安全] IP {ip} 被封禁 {ban_minutes} 分钟（失败 {info['attempts']} 次）")
 
 
 def reset_failed_logins(ip: str):
@@ -147,7 +245,8 @@ def is_totp_required() -> bool:
 
 
 def create_token(username: str) -> str:
-    expire = datetime.utcnow() + timedelta(hours=TOKEN_EXPIRE_HOURS)
+    expire_utc = datetime.now(timezone.utc) + timedelta(hours=TOKEN_EXPIRE_HOURS)
+    expire = expire_utc.replace(tzinfo=None)
     payload = {"sub": username, "exp": expire}
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
@@ -179,12 +278,12 @@ async def get_current_user(request: Request) -> str:
 # ============================================
 
 
-async def parse_srs_api(api_url: str, rtmp_base: str) -> list:
+async def parse_srs_api(api_url: str, rtmp_base: str, timeout: int = 5) -> list:
     """解析 SRS HTTP API 返回的流列表"""
     streams = []
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
                 data = await resp.json()
                 if data.get("code") != 0:
                     return streams
@@ -206,16 +305,16 @@ async def parse_srs_api(api_url: str, rtmp_base: str) -> list:
                             "active": True,
                         })
     except Exception as e:
-        print(f"[SRS] 解析失败 {api_url}: {e}")
+        logger.warning(f"[SRS] 解析失败 {api_url}: {e}")
     return streams
 
 
-async def parse_nginx_rtmp_stat(api_url: str, rtmp_base: str) -> list:
+async def parse_nginx_rtmp_stat(api_url: str, rtmp_base: str, timeout: int = 5) -> list:
     """解析 nginx-rtmp stat XML 返回的流列表"""
     streams = []
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
                 xml_text = await resp.text()
                 root = ET.fromstring(xml_text)
                 for app in root.findall(".//application"):
@@ -239,20 +338,20 @@ async def parse_nginx_rtmp_stat(api_url: str, rtmp_base: str) -> list:
                                     "active": True,
                                 })
     except Exception as e:
-        print(f"[Nginx-RTMP] 解析失败 {api_url}: {e}")
+        logger.warning(f"[Nginx-RTMP] 解析失败 {api_url}: {e}")
     return streams
 
 
-async def fetch_streams(source: dict) -> list:
+async def fetch_streams(source: dict, timeout: int = 5) -> list:
     """根据流源类型获取实时流列表"""
     api_url = source.get("api_url", "")
     rtmp_base = source.get("rtmp_base", "rtmp://127.0.0.1/live/")
     source_type = source.get("type", "srs")
 
     if source_type == "nginx-rtmp":
-        return await parse_nginx_rtmp_stat(api_url, rtmp_base)
+        return await parse_nginx_rtmp_stat(api_url, rtmp_base, timeout)
     else:
-        return await parse_srs_api(api_url, rtmp_base)
+        return await parse_srs_api(api_url, rtmp_base, timeout)
 
 
 # ============================================
@@ -306,7 +405,7 @@ async def probe_rtmp_stream(url: str, timeout: int = 5) -> Optional[dict]:
     except asyncio.TimeoutError:
         return None
     except Exception as e:
-        print(f"[RTMP探测] 失败 {url}: {e}")
+        logger.warning(f"[RTMP探测] 失败 {url}: {e}")
         return None
 
 
@@ -406,7 +505,7 @@ async def execute_hook(script: str, ctx: dict, hook_type: str):
         return
 
     resolved = resolve_vars(script, ctx)
-    print(f"[Hook] 执行 {hook_type}: {resolved[:200]}")
+    logger.info(f"[Hook] 执行 {hook_type}: {resolved[:200]}")
 
     try:
         process = await asyncio.create_subprocess_shell(
@@ -417,7 +516,7 @@ async def execute_hook(script: str, ctx: dict, hook_type: str):
         # 不等待，后台执行（避免阻塞录制流程），但记录结果
         asyncio.create_task(_log_hook_result(process, hook_type))
     except Exception as e:
-        print(f"[Hook] 执行异常 ({hook_type}): {e}")
+        logger.error(f"[Hook] 执行异常 ({hook_type}): {e}")
 
 
 async def _log_hook_result(process, hook_type: str):
@@ -426,15 +525,15 @@ async def _log_hook_result(process, hook_type: str):
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
         if process.returncode != 0:
             err_msg = stderr.decode("utf-8", errors="replace")[:500]
-            print(f"[Hook] {hook_type} 失败 (code={process.returncode}): {err_msg}")
+            logger.error(f"[Hook] {hook_type} 失败 (code={process.returncode}): {err_msg}")
         else:
             out_msg = stdout.decode("utf-8", errors="replace")[:200]
             if out_msg.strip():
-                print(f"[Hook] {hook_type} 完成: {out_msg.strip()}")
+                logger.info(f"[Hook] {hook_type} 完成: {out_msg.strip()}")
     except asyncio.TimeoutError:
-        print(f"[Hook] {hook_type} 超时（被忽略）")
+        logger.warning(f"[Hook] {hook_type} 超时（被忽略）")
     except Exception as e:
-        print(f"[Hook] 结果处理异常: {e}")
+        logger.error(f"[Hook] 结果处理异常: {e}")
 
 
 # ============================================
@@ -476,7 +575,7 @@ async def start_recording(
     """启动 FFmpeg 录制。record_type: 'api' 或 'rtmp_sub'"""
     key = make_stream_key(source_name, stream_name)
     if key in active_recordings:
-        print(f"[录制] 已在录制中: {key}")
+        logger.info(f"[录制] 已在录制中: {key}")
         return False
 
     output_dir = Path(config["recording"].get("output_dir", "./recordings"))
@@ -493,7 +592,7 @@ async def start_recording(
     ffmpeg_args = config["recording"].get("ffmpeg_args", "-c copy -f mp4")
     cmd = f'"{ffmpeg_path}" -i "{source_url}" {ffmpeg_args} "{output_path}" -y'
 
-    print(f"[FFmpeg] 开始录制 [{record_type}]: {cmd}")
+    logger.info(f"[FFmpeg] 开始录制 [{record_type}]: {cmd}")
 
     try:
         if sys.platform == "win32":
@@ -522,7 +621,7 @@ async def start_recording(
             "filename": filename,
             "record_type": record_type,
         }
-        print(f"[录制] 已启动: {key} → {filename}")
+        logger.warning(f"[录制] 已启动: {key} → {filename}")
 
         # 执行录制开始钩子
         hooks = get_stream_hooks(source_url, record_type)
@@ -541,7 +640,7 @@ async def start_recording(
 
         return True
     except Exception as e:
-        print(f"[FFmpeg] 启动失败: {e}")
+        logger.error(f"[FFmpeg] 启动失败: {e}")
         return False
 
 
@@ -554,7 +653,7 @@ async def stop_recording(key: str) -> bool:
     process = info["process"]
     source_url = info.get("source_url", "")
     record_type = info.get("record_type", "api")
-    print(f"[FFmpeg] 停止录制: {key}")
+    logger.info(f"[FFmpeg] 停止录制: {key}")
 
     try:
         if process.stdin:
@@ -567,7 +666,7 @@ async def stop_recording(key: str) -> bool:
     try:
         await asyncio.wait_for(process.wait(), timeout=15)
     except asyncio.TimeoutError:
-        print(f"[FFmpeg] 超时，强制终止: {key}")
+        logger.warning(f"[FFmpeg] 超时，强制终止: {key}")
         try:
             process.kill()
             await process.wait()
@@ -599,10 +698,10 @@ async def stop_recording(key: str) -> bool:
             if sub.get("url", "") == source_url:
                 s_key = sub_key(sub)
                 paused_subscriptions.discard(s_key)
-                print(f"[轮询] 恢复订阅轮询: {source_url}")
+                logger.info(f"[轮询] 恢复订阅轮询: {source_url}")
                 break
 
-    print(f"[录制] 已停止: {key}")
+    logger.warning(f"[录制] 已停止: {key}")
     return True
 
 
@@ -663,7 +762,7 @@ async def probe_and_record_subscription(sub: dict):
         if started:
             # 录制开始，暂停该订阅的轮询
             paused_subscriptions.add(s_key)
-            print(f"[轮询] 暂停订阅轮询（录制中）: {url}")
+            logger.info(f"[轮询] 暂停订阅轮询（录制中）: {url}")
 
 
 async def check_and_stop_finished_sub_recordings():
@@ -687,11 +786,11 @@ async def check_and_stop_finished_sub_recordings():
             probe_result = await probe_rtmp_stream(source_url, 3)
             if not probe_result or not probe_result.get("online"):
                 # 流不在线，可以安全地清理录制记录
-                print(f"[轮询] FFmpeg 已退出，流不在线，恢复轮询: {source_url}")
+                logger.info(f"[轮询] FFmpeg 已退出，流不在线，恢复轮询: {source_url}")
                 await stop_recording(key)
             else:
                 # 流还在线但 FFmpeg 退出了（可能是错误），重新开始录制
-                print(f"[轮询] FFmpeg 异常退出，流仍在线，重新录制: {source_url}")
+                logger.warning(f"[轮询] FFmpeg 异常退出，流仍在线，重新录制: {source_url}")
                 del active_recordings[key]
 
                 # 找到对应的订阅信息
@@ -715,39 +814,53 @@ async def polling_loop():
 
     global_interval = config["polling"].get("interval", 10)
     loop_tick = 1  # 每秒检查一次
-    tick_count = 0
 
     while polling_running:
         try:
-            # ---- 1. API 模式：按全局间隔扫描 SRS/nginx-rtmp 流源 ----
-            if tick_count % global_interval == 0:
-                sources = config.get("stream_sources", [])
-                all_active_api_streams = set()
+            # ---- 1. API 模式：按各自间隔扫描 SRS/nginx-rtmp 流源 ----
+            sources = config.get("stream_sources", [])
+            all_active_api_streams = set()
+            now = datetime.now()
 
-                for source in sources:
-                    source_name = source.get("name", "Unknown")
-                    try:
-                        streams = await fetch_streams(source)
-                        for s in streams:
-                            key = make_stream_key(source_name, s["stream_name"])
-                            all_active_api_streams.add(key)
+            for source in sources:
+                source_name = source.get("name", "Unknown")
+                src_interval = source.get("poll_interval", global_interval)
+                if src_interval < 1:
+                    src_interval = global_interval
 
-                            if key not in active_recordings:
-                                await start_recording(
-                                    source_name,
-                                    s["stream_name"],
-                                    s["source_url"],
-                                    record_type="api",
-                                )
-                    except Exception as e:
-                        print(f"[轮询-API] 扫描失败 {source_name}: {e}")
+                # 时间段检查
+                if not is_in_poll_window(source):
+                    continue
 
-                # API 模式：检查流失效
-                for key in list(active_recordings.keys()):
-                    info = active_recordings.get(key, {})
-                    if info.get("record_type") == "api" and key not in all_active_api_streams:
-                        print(f"[轮询-API] 流已下线，停止录制: {key}")
-                        await stop_recording(key)
+                last_time = last_source_poll_times.get(source_name)
+                if last_time and (now - last_time).total_seconds() < src_interval:
+                    continue
+
+                last_source_poll_times[source_name] = now
+
+                try:
+                    streams = await fetch_streams(source)
+                    for s in streams:
+                        key = make_stream_key(source_name, s["stream_name"])
+                        all_active_api_streams.add(key)
+
+                        if key not in active_recordings:
+                            logger.warning(f"[轮询-API] 检测到新流: {source_name}/{s['stream_name']}")
+                            await start_recording(
+                                source_name,
+                                s["stream_name"],
+                                s["source_url"],
+                                record_type="api",
+                            )
+                except Exception as e:
+                    logger.warning(f"[轮询-API] 扫描失败 {source_name}: {e}")
+
+            # API 模式：检查流失效
+            for key in list(active_recordings.keys()):
+                info = active_recordings.get(key, {})
+                if info.get("record_type") == "api" and key not in all_active_api_streams:
+                    logger.info(f"[轮询-API] 流已下线，停止录制: {key}")
+                    await stop_recording(key)
 
             # ---- 2. RTMP 直接订阅模式（独立间隔）----
             await check_and_stop_finished_sub_recordings()
@@ -784,12 +897,11 @@ async def polling_loop():
                 try:
                     await probe_and_record_subscription(sub)
                 except Exception as e:
-                    print(f"[轮询-订阅] 探测失败 {url}: {e}")
+                    logger.warning(f"[轮询-订阅] 探测失败 {url}: {e}")
 
         except Exception as e:
-            print(f"[轮询] 循环异常: {e}")
+            logger.error(f"[轮询] 循环异常: {e}")
 
-        tick_count += 1
         await asyncio.sleep(loop_tick)
 
 
@@ -882,7 +994,7 @@ async def check_auth(username: str = None):
 
 # --- 流源管理（API 模式） ---
 @app.get("/api/sources")
-async def get_sources(user: str = None):
+async def get_sources(user: str = Depends(get_current_user)):
     sources = config.get("stream_sources", [])
     for i, s in enumerate(sources):
         s["_id"] = i
@@ -890,7 +1002,7 @@ async def get_sources(user: str = None):
 
 
 @app.post("/api/sources")
-async def add_source(request: Request, user: str = None):
+async def add_source(request: Request, user: str = Depends(get_current_user)):
     body = await request.json()
     name = body.get("name", "").strip()
     api_url = body.get("api_url", "").strip()
@@ -902,18 +1014,21 @@ async def add_source(request: Request, user: str = None):
 
     config.setdefault("stream_sources", []).append({
         "name": name, "type": source_type, "api_url": api_url, "rtmp_base": rtmp_base,
+        "poll_interval": body.get("poll_interval"),
+        "poll_start": body.get("poll_start", "").strip(),
+        "poll_end": body.get("poll_end", "").strip(),
     })
     save_config(config)
     return {"success": True, "message": "流源添加成功"}
 
 
 @app.put("/api/sources/{source_id}")
-async def update_source(source_id: int, request: Request, user: str = None):
+async def update_source(source_id: int, request: Request, user: str = Depends(get_current_user)):
     sources = config.get("stream_sources", [])
     if source_id < 0 or source_id >= len(sources):
         raise HTTPException(status_code=404, detail="流源不存在")
     body = await request.json()
-    for key in ["name", "type", "api_url", "rtmp_base"]:
+    for key in ["name", "type", "api_url", "rtmp_base", "poll_interval", "poll_start", "poll_end"]:
         if key in body:
             sources[source_id][key] = body[key]
     save_config(config)
@@ -921,19 +1036,97 @@ async def update_source(source_id: int, request: Request, user: str = None):
 
 
 @app.delete("/api/sources/{source_id}")
-async def delete_source(source_id: int, user: str = None):
+async def delete_source(source_id: int, user: str = Depends(get_current_user)):
     sources = config.get("stream_sources", [])
     if source_id < 0 or source_id >= len(sources):
         raise HTTPException(status_code=404, detail="流源不存在")
     deleted = sources.pop(source_id)
     save_config(config)
-    print(f"[配置] 已删除流源: {deleted.get('name')}")
+    logger.info(f"[配置] 已删除流源: {deleted.get('name')}")
     return {"success": True, "message": f"流源 '{deleted.get('name')}' 已删除"}
+
+
+@app.post("/api/sources/{source_id}/test")
+async def test_source(source_id: int, user: str = Depends(get_current_user)):
+    """测试流源连通性：先测试 HTTP 连通性，再解析流列表"""
+    sources = config.get("stream_sources", [])
+    if source_id < 0 or source_id >= len(sources):
+        raise HTTPException(status_code=404, detail="流源不存在")
+
+    source = sources[source_id]
+    api_url = source.get("api_url", "")
+
+    # 第一步：测试 HTTP 连通性
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status >= 400:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"API 返回错误状态码 {resp.status}",
+                    )
+                # 读取响应内容
+                content_type = resp.headers.get("Content-Type", "")
+                body = await resp.read()
+    except aiohttp.ClientConnectorError as e:
+        raise HTTPException(status_code=400, detail=f"无法连接: {e}")
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=400, detail="连接超时（5秒）")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"网络错误: {e}")
+
+    # 第二步：解析流列表
+    source_type = source.get("type", "srs")
+    streams = []
+    try:
+        if source_type == "nginx-rtmp":
+            body_text = body.decode("utf-8", errors="replace")
+            root = ET.fromstring(body_text)
+            for app in root.findall(".//application"):
+                app_name = app.findtext("name", "")
+                for live in app.findall("live"):
+                    for stream in live.findall("stream"):
+                        name = stream.findtext("name", "")
+                        active = stream.find("active")
+                        is_active = active is not None and active.text == "1"
+                        if is_active:
+                            streams.append({
+                                "stream_name": f"{app_name}/{name}" if app_name else name,
+                                "resolution": f"{stream.findtext('.//meta/video/width', '?')}x{stream.findtext('.//meta/video/height', '?')}",
+                                "video_codec": stream.findtext(".//meta/video/codec", "N/A"),
+                                "clients": int(stream.findtext("nclients", "0")),
+                            })
+        else:
+            data = json.loads(body.decode("utf-8", errors="replace"))
+            if data.get("code") == 0:
+                for s in data.get("streams", []):
+                    pub = s.get("publish", {})
+                    if pub.get("active"):
+                        video = s.get("video", {})
+                        streams.append({
+                            "stream_name": s.get("name", ""),
+                            "resolution": f"{video.get('width', '?')}x{video.get('height', '?')}",
+                            "video_codec": video.get("codec", "N/A"),
+                            "clients": s.get("clients", 0),
+                        })
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"解析响应失败: {e}")
+
+    return {
+        "success": True,
+        "source_name": source.get("name"),
+        "source_type": source.get("type"),
+        "api_url": api_url,
+        "stream_count": len(streams),
+        "streams": streams[:20],
+    }
 
 
 # --- RTMP 直接订阅管理 ---
 @app.get("/api/subscriptions")
-async def get_subscriptions(user: str = None):
+async def get_subscriptions(user: str = Depends(get_current_user)):
     """获取所有 RTMP 直接订阅"""
     subs = (config.get("rtmp_subscriptions") or [])
     for i, s in enumerate(subs):
@@ -957,7 +1150,7 @@ async def get_subscriptions(user: str = None):
 
 
 @app.post("/api/subscriptions")
-async def add_subscription(request: Request, user: str = None):
+async def add_subscription(request: Request, user: str = Depends(get_current_user)):
     """添加 RTMP 直接订阅"""
     body = await request.json()
     url = body.get("url", "").strip()
@@ -987,7 +1180,7 @@ async def add_subscription(request: Request, user: str = None):
 
 
 @app.put("/api/subscriptions/{sub_id}")
-async def update_subscription(sub_id: int, request: Request, user: str = None):
+async def update_subscription(sub_id: int, request: Request, user: str = Depends(get_current_user)):
     """更新 RTMP 直接订阅"""
     subs = (config.get("rtmp_subscriptions") or [])
     if sub_id < 0 or sub_id >= len(subs):
@@ -1007,7 +1200,7 @@ async def update_subscription(sub_id: int, request: Request, user: str = None):
 
 
 @app.delete("/api/subscriptions/{sub_id}")
-async def delete_subscription(sub_id: int, user: str = None):
+async def delete_subscription(sub_id: int, user: str = Depends(get_current_user)):
     """删除 RTMP 直接订阅"""
     subs = (config.get("rtmp_subscriptions") or [])
     if sub_id < 0 or sub_id >= len(subs):
@@ -1020,7 +1213,7 @@ async def delete_subscription(sub_id: int, user: str = None):
     paused_subscriptions.discard(sub_key(deleted))
 
     save_config(config)
-    print(f"[配置] 已删除RTMP订阅: {deleted.get('url')}")
+    logger.info(f"[配置] 已删除RTMP订阅: {deleted.get('url')}")
     return {"success": True, "message": f"订阅 '{deleted.get('remarks', deleted.get('url'))}' 已删除"}
 
 
@@ -1033,7 +1226,7 @@ async def _stop_subscription_recording(sub: dict):
 
 
 @app.post("/api/subscriptions/{sub_id}/probe")
-async def probe_subscription_now(sub_id: int, user: str = None):
+async def probe_subscription_now(sub_id: int, user: str = Depends(get_current_user)):
     """立即探测某个 RTMP 订阅（手动触发）"""
     subs = (config.get("rtmp_subscriptions") or [])
     if sub_id < 0 or sub_id >= len(subs):
@@ -1046,7 +1239,7 @@ async def probe_subscription_now(sub_id: int, user: str = None):
 
 # --- 实时状态 ---
 @app.get("/api/streams/status")
-async def get_streams_status(user: str = None):
+async def get_streams_status(user: str = Depends(get_current_user)):
     """获取所有流的状态（API 模式 + RTMP 订阅模式）"""
     results = []
 
@@ -1055,7 +1248,7 @@ async def get_streams_status(user: str = None):
     for source in sources:
         source_name = source.get("name", "Unknown")
         try:
-            streams = await fetch_streams(source)
+            streams = await fetch_streams(source, timeout=2)
             for s in streams:
                 key = make_stream_key(source_name, s["stream_name"])
                 s["source_name"] = source_name
@@ -1107,7 +1300,7 @@ async def get_streams_status(user: str = None):
             })
         elif s_key not in paused_subscriptions and is_in_poll_window(sub):
             try:
-                probe = await probe_rtmp_stream(url, sub.get("probe_timeout", 5))
+                probe = await probe_rtmp_stream(url, min(sub.get("probe_timeout", 5), 3))
                 sub["_last_online"] = probe is not None and probe.get("online")
                 if probe and probe.get("online"):
                     results.append({
@@ -1143,7 +1336,7 @@ async def get_streams_status(user: str = None):
 
 # --- 轮询控制 ---
 @app.get("/api/polling/status")
-async def get_polling_status(user: str = None):
+async def get_polling_status(user: str = Depends(get_current_user)):
     """获取轮询状态"""
     subs = (config.get("rtmp_subscriptions") or [])
     return {
@@ -1167,19 +1360,19 @@ async def get_polling_status(user: str = None):
 
 
 @app.post("/api/polling/start")
-async def api_start_polling(user: str = None):
+async def api_start_polling(user: str = Depends(get_current_user)):
     await start_polling()
     return {"success": True, "message": "轮询已启动"}
 
 
 @app.post("/api/polling/stop")
-async def api_stop_polling(user: str = None):
+async def api_stop_polling(user: str = Depends(get_current_user)):
     await stop_polling()
     return {"success": True, "message": "轮询已停止"}
 
 
 @app.put("/api/polling/interval")
-async def set_polling_interval(request: Request, user: str = None):
+async def set_polling_interval(request: Request, user: str = Depends(get_current_user)):
     body = await request.json()
     interval = body.get("interval", 10)
     if interval < 3:
@@ -1191,7 +1384,7 @@ async def set_polling_interval(request: Request, user: str = None):
 
 # --- 录制管理 ---
 @app.get("/api/recordings")
-async def get_recordings(user: str = None):
+async def get_recordings(user: str = Depends(get_current_user)):
     output_dir = Path(config["recording"].get("output_dir", "./recordings"))
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1217,7 +1410,7 @@ async def get_recordings(user: str = None):
 
 
 @app.get("/api/recordings/{filename}/play")
-async def play_recording(filename: str, user: str = None):
+async def play_recording(filename: str, user: str = Depends(get_current_user)):
     output_dir = Path(config["recording"].get("output_dir", "./recordings"))
     filepath = output_dir / filename
     if not filepath.exists():
@@ -1226,7 +1419,7 @@ async def play_recording(filename: str, user: str = None):
 
 
 @app.delete("/api/recordings/{filename}")
-async def delete_recording(filename: str, user: str = None):
+async def delete_recording(filename: str, user: str = Depends(get_current_user)):
     output_dir = Path(config["recording"].get("output_dir", "./recordings"))
     filepath = output_dir / filename
     if not filepath.exists():
@@ -1293,7 +1486,7 @@ async def stream_video(filename: str, request: Request):
 
 # --- 配置管理 ---
 @app.put("/api/config/auth")
-async def update_auth(request: Request, user: str = None):
+async def update_auth(request: Request, user: str = Depends(get_current_user)):
     body = await request.json()
     if "username" in body:
         config["auth"]["username"] = body["username"]
@@ -1305,7 +1498,7 @@ async def update_auth(request: Request, user: str = None):
 
 # --- 安全功能 ---
 @app.get("/api/security/status")
-async def get_security_status(request: Request, user: str = None):
+async def get_security_status(request: Request, user: str = Depends(get_current_user)):
     """获取安全状态：当前 IP、TOTP 状态、封禁列表"""
     ip = get_client_ip(request)
     totp_enabled = is_totp_required()
@@ -1331,7 +1524,7 @@ async def get_security_status(request: Request, user: str = None):
 
 
 @app.post("/api/security/totp/setup")
-async def setup_totp(request: Request, user: str = None):
+async def setup_totp(request: Request, user: str = Depends(get_current_user)):
     """生成 TOTP 密钥，返回密钥和二维码（base64 PNG）"""
     secret = pyotp.random_base32()
     issuer = "StreamRecorder"
@@ -1351,7 +1544,7 @@ async def setup_totp(request: Request, user: str = None):
 
 
 @app.post("/api/security/totp/verify")
-async def verify_totp(request: Request, user: str = None):
+async def verify_totp(request: Request, user: str = Depends(get_current_user)):
     """验证 TOTP 设置（需提供当前有效验证码）"""
     body = await request.json()
     code = body.get("code", "").strip()
@@ -1372,7 +1565,7 @@ async def verify_totp(request: Request, user: str = None):
 
 
 @app.post("/api/security/totp/disable")
-async def disable_totp(request: Request, user: str = None):
+async def disable_totp(request: Request, user: str = Depends(get_current_user)):
     """禁用 TOTP"""
     body = await request.json()
     code = body.get("code", "").strip()
@@ -1391,30 +1584,57 @@ async def disable_totp(request: Request, user: str = None):
 
 
 @app.post("/api/security/unban")
-async def unban_ip(request: Request, user: str = None):
+async def unban_ip(request: Request, user: str = Depends(get_current_user)):
     """手动解封 IP"""
     body = await request.json()
     ip = body.get("ip", "").strip()
     if not ip:
         raise HTTPException(status_code=400, detail="请指定 IP")
     failed_logins.pop(ip, None)
-    print(f"[安全] 手动解封 IP: {ip}")
+    logger.warning(f"[安全] 手动解封 IP: {ip}")
     return {"success": True, "message": f"IP {ip} 已解封"}
+
+
+# --- 日志查看 ---
+@app.get("/api/logs")
+async def get_logs(
+    level: str = Query(None, description="日志级别: DEBUG/INFO/WARNING/ERROR"),
+    limit: int = Query(200, ge=10, le=2000, description="返回条数"),
+    search: str = Query(None, description="搜索关键词"),
+    user: str = Depends(get_current_user),
+):
+    """获取系统日志"""
+    if ring_handler is None:
+        return {"logs": [], "total": 0}
+    logs = ring_handler.get_logs(level=level, limit=limit, search=search)
+    return {"logs": logs, "total": len(logs)}
+
+
+@app.get("/api/logs/download")
+async def download_logs(user: str = Depends(get_current_user)):
+    """下载完整日志文件"""
+    log_file = BASE_DIR / "logs" / "app.log"
+    if log_file.exists():
+        return FileResponse(log_file, media_type="text/plain", filename="stream-recorder.log")
+    raise HTTPException(status_code=404, detail="日志文件不存在")
 
 
 # --- 文件系统 & 配置 ---
 @app.get("/api/config")
-async def get_config_info(user: str = None):
+async def get_config_info(user: str = Depends(get_current_user)):
     """获取当前配置中的关键信息"""
     return {
         "port": config["server"].get("port", 5000),
         "host": config["server"].get("host", "127.0.0.1"),
         "recording_dir": config["recording"].get("output_dir", "./recordings"),
+        "log_level": config.get("logging", {}).get("file_level", "INFO"),
+        "log_max_size_mb": config.get("logging", {}).get("max_size_mb", 10),
+        "log_backup_count": config.get("logging", {}).get("backup_count", 5),
     }
 
 
 @app.put("/api/config/recording_dir")
-async def update_recording_dir(request: Request, user: str = None):
+async def update_recording_dir(request: Request, user: str = Depends(get_current_user)):
     """更新录制文件保存目录"""
     body = await request.json()
     new_dir = body.get("path", "").strip()
@@ -1437,7 +1657,7 @@ async def update_recording_dir(request: Request, user: str = None):
 
 
 @app.put("/api/config/port")
-async def update_port(request: Request, user: str = None):
+async def update_port(request: Request, user: str = Depends(get_current_user)):
     """更新 Web 端口（需重启生效）"""
     body = await request.json()
     port = body.get("port", 0)
@@ -1448,8 +1668,37 @@ async def update_port(request: Request, user: str = None):
     return {"success": True, "port": port, "message": "端口已保存，重启服务后生效"}
 
 
+@app.put("/api/config/logging")
+async def update_logging_config(request: Request, user: str = Depends(get_current_user)):
+    """更新日志配置（即时生效）"""
+    body = await request.json()
+    log_cfg = config.setdefault("logging", {})
+
+    if "file_level" in body:
+        level = body["file_level"].upper()
+        if level not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            raise HTTPException(status_code=400, detail="级别必须是 DEBUG/INFO/WARNING/ERROR")
+        log_cfg["file_level"] = level
+
+    if "max_size_mb" in body:
+        size = body["max_size_mb"]
+        if not (1 <= size <= 500):
+            raise HTTPException(status_code=400, detail="大小范围: 1-500 MB")
+        log_cfg["max_size_mb"] = size
+
+    if "backup_count" in body:
+        count = body["backup_count"]
+        if not (1 <= count <= 30):
+            raise HTTPException(status_code=400, detail="备份数范围: 1-30")
+        log_cfg["backup_count"] = count
+
+    save_config(config)
+    reconfigure_logging()
+    return {"success": True, "message": "日志配置已更新（即时生效）"}
+
+
 @app.get("/api/filesystem/browse")
-async def browse_directory(path: str = "/", user: str = None):
+async def browse_directory(path: str = "/", user: str = Depends(get_current_user)):
     """浏览文件系统目录（用于文件夹选择器）"""
     try:
         target = Path(path).resolve()
@@ -1496,7 +1745,7 @@ async def browse_directory(path: str = "/", user: str = None):
 
 
 @app.post("/api/filesystem/test")
-async def test_directory(request: Request, user: str = None):
+async def test_directory(request: Request, user: str = Depends(get_current_user)):
     """测试目录是否可读写"""
     body = await request.json()
     path_str = body.get("path", "").strip()
@@ -1564,10 +1813,10 @@ async def index():
 async def on_startup():
     print("=" * 55)
     print("  流媒体自动录制系统 v2.0.0")
-    print(f"  服务地址: http://{config['server']['host']}:{config['server']['port']}")
-    print(f"  录制目录: {config['recording']['output_dir']}")
-    print(f"  API 流源: {len(config.get('stream_sources', []))} 个")
-    print(f"  RTMP 订阅: {len(config.get('rtmp_subscriptions') or [])} 个")
+    logger.info(f"  服务地址: http://{config['server']['host']}:{config['server']['port']}")
+    logger.info(f"  录制目录: {config['recording']['output_dir']}")
+    logger.info(f"  API 流源: {len(config.get('stream_sources', []))} 个")
+    logger.info(f"  RTMP 订阅: {len(config.get('rtmp_subscriptions') or [])} 个")
     print("=" * 55)
 
     output_dir = Path(config["recording"].get("output_dir", "./recordings"))
@@ -1641,11 +1890,11 @@ if __name__ == "__main__":
         filtered_argv = [a for a in sys.argv[1:] if a not in ("--daemon", "-d")]
         cmd = [sys.executable, __file__] + filtered_argv
 
-        print(f"[启动] 后台模式：服务将在后台启动")
-        print(f"[启动] 监听地址: {host}:{args.port}")
-        print(f"[启动] 标准输出 → {out_log}")
-        print(f"[启动] 错误输出 → {err_log}")
-        print(f"[启动] PID 文件 → {log_dir / 'server.pid'}")
+        logger.info(f"[启动] 后台模式：服务将在后台启动")
+        logger.info(f"[启动] 监听地址: {host}:{args.port}")
+        logger.info(f"[启动] 标准输出 → {out_log}")
+        logger.info(f"[启动] 错误输出 → {err_log}")
+        logger.info(f"[启动] PID 文件 → {log_dir / 'server.pid'}")
 
         with open(out_log, "a") as out_f, open(err_log, "a") as err_f:
             out_f.write(f"\n--- 启动于 {__import__('datetime').datetime.now()} ---\n")
@@ -1663,17 +1912,17 @@ if __name__ == "__main__":
         with open(log_dir / "server.pid", "w") as f:
             f.write(str(proc.pid))
 
-        print(f"[启动] 后台进程 PID: {proc.pid}，主进程退出")
+        logger.info(f"[启动] 后台进程 PID: {proc.pid}，主进程退出")
         sys.exit(0)
 
     # 前台模式（默认）：进程保持在前台，Ctrl+C 停止
     access_note = "仅本地访问" if host == "127.0.0.1" else "[!] 允许外部访问 (--test 模式)"
     print("=" * 55)
     print("  流媒体自动录制系统 v2.4")
-    print(f"  模式: 前台运行 (适合 supervisor/systemd 管理)")
-    print(f"  地址: http://{host}:{args.port}")
-    print(f"  访问: {access_note}")
-    print(f"  按 Ctrl+C 停止服务")
+    logger.info(f"  模式: 前台运行 (适合 supervisor/systemd 管理)")
+    logger.info(f"  地址: http://{host}:{args.port}")
+    logger.info(f"  访问: {access_note}")
+    logger.info(f"  按 Ctrl+C 停止服务")
     print("=" * 55)
 
     uvicorn.run(
