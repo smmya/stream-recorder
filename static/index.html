@@ -1,0 +1,1226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>流媒体自动录制系统</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --bg-card: #1a1d27;
+            --bg-card-hover: #22253a;
+            --bg-input: #13151f;
+            --border: #2a2d3a;
+            --text: #e0e0e0;
+            --text-secondary: #8b8fa3;
+            --accent: #4f8cff;
+            --accent-hover: #6ba0ff;
+            --green: #34d399;
+            --red: #f87171;
+            --yellow: #fbbf24;
+            --radius: 10px;
+            --radius-sm: 6px;
+            --shadow: 0 4px 24px rgba(0,0,0,0.3);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+        /* Login */
+        .login-container {
+            display: flex; align-items: center; justify-content: center; min-height: 100vh;
+            background: radial-gradient(ellipse at center, #1a1d27 0%, #0f1117 70%);
+        }
+        .login-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 48px 40px;
+            width: 400px;
+            box-shadow: var(--shadow);
+        }
+        .login-card h1 { font-size: 24px; color: var(--accent); margin-bottom: 8px; text-align: center; }
+        .login-card .subtitle { color: var(--text-secondary); text-align: center; margin-bottom: 32px; font-size: 14px; }
+        .login-card label { display: block; color: var(--text-secondary); font-size: 13px; margin-bottom: 6px; }
+        .login-card input {
+            width: 100%; padding: 12px 16px; background: var(--bg-input); border: 1px solid var(--border);
+            border-radius: var(--radius-sm); color: var(--text); font-size: 15px; margin-bottom: 20px;
+            outline: none; transition: border .2s;
+        }
+        .login-card input:focus { border-color: var(--accent); }
+        .login-card .btn {
+            width: 100%; padding: 12px; background: var(--accent); color: #fff; border: none;
+            border-radius: var(--radius-sm); font-size: 16px; cursor: pointer; transition: background .2s;
+        }
+        .login-card .btn:hover { background: var(--accent-hover); }
+        .login-error { color: var(--red); text-align: center; margin-top: 12px; font-size: 13px; display: none; }
+        /* App Layout */
+        .app { display: none; }
+        .app.active { display: flex; flex-direction: column; height: 100vh; }
+        /* Top Bar */
+        .topbar {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0 24px; height: 56px; background: var(--bg-card); border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+        .topbar-left { display: flex; align-items: center; gap: 16px; }
+        .topbar .logo { color: var(--accent); font-size: 18px; font-weight: 700; }
+        .polling-badge {
+            display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 5px 12px;
+            border-radius: 20px; font-weight: 600;
+        }
+        .polling-badge.on { background: rgba(52,211,153,0.15); color: var(--green); }
+        .polling-badge.off { background: rgba(248,113,113,0.15); color: var(--red); }
+        .polling-dot { width: 8px; height: 8px; border-radius: 50%; }
+        .polling-badge.on .polling-dot { background: var(--green); animation: pulse 1.5s infinite; }
+        .polling-badge.off .polling-dot { background: var(--red); }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+        .topbar-right { display: flex; align-items: center; gap: 12px; }
+        .btn-sm {
+            padding: 6px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+            background: transparent; color: var(--text); cursor: pointer; font-size: 13px; transition: all .2s;
+        }
+        .btn-sm:hover { border-color: var(--accent); color: var(--accent); }
+        .btn-sm.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+        .btn-sm.primary:hover { background: var(--accent-hover); }
+        .btn-sm.danger { border-color: var(--red); color: var(--red); }
+        .btn-sm.danger:hover { background: rgba(248,113,113,0.1); }
+        /* Tabs */
+        .tabs {
+            display: flex; gap: 4px; padding: 8px 20px; background: var(--bg-card);
+            border-bottom: 1px solid var(--border); flex-shrink: 0;
+        }
+        .tab {
+            padding: 8px 20px; border-radius: var(--radius-sm); cursor: pointer; font-size: 14px;
+            color: var(--text-secondary); transition: all .2s; border: none; background: transparent;
+        }
+        .tab:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+        .tab.active { color: var(--accent); background: rgba(79,140,255,0.1); font-weight: 600; }
+        /* Content */
+        .content { flex: 1; overflow-y: auto; padding: 24px; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        /* Cards */
+        .card {
+            background: var(--bg-card); border: 1px solid var(--border);
+            border-radius: var(--radius); padding: 20px; margin-bottom: 16px;
+        }
+        .card-header {
+            display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;
+        }
+        .card-header h3 { font-size: 16px; font-weight: 600; }
+        /* Tables */
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 10px 14px; text-align: left; font-size: 13px; }
+        th { color: var(--text-secondary); font-weight: 500; border-bottom: 1px solid var(--border); }
+        td { border-bottom: 1px solid rgba(42,45,58,0.4); }
+        tr:hover td { background: rgba(255,255,255,0.02); }
+        .status-dot {
+            display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px;
+        }
+        .status-dot.green { background: var(--green); }
+        .status-dot.red { background: var(--red); }
+        .badge {
+            display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600;
+        }
+        .badge.srs { background: rgba(79,140,255,0.15); color: var(--accent); }
+        .badge.nginx { background: rgba(52,211,153,0.15); color: var(--green); }
+        /* Modal */
+        .modal-overlay {
+            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.6); z-index: 100; align-items: center; justify-content: center;
+        }
+        .modal-overlay.active { display: flex; }
+        .modal {
+            background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 28px; width: 520px; max-width: 90vw; box-shadow: var(--shadow);
+        }
+        .modal h3 { font-size: 18px; margin-bottom: 20px; }
+        .modal label { display: block; color: var(--text-secondary); font-size: 13px; margin-bottom: 6px; }
+        .modal input, .modal select {
+            width: 100%; padding: 10px 14px; background: var(--bg-input); border: 1px solid var(--border);
+            border-radius: var(--radius-sm); color: var(--text); font-size: 14px; margin-bottom: 16px;
+            outline: none;
+        }
+        .modal input:focus, .modal select:focus { border-color: var(--accent); }
+        .modal .btn-row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 8px; }
+        .modal .btn-row .btn-sm { padding: 8px 20px; font-size: 14px; }
+        /* Video Player */
+        .video-modal .modal { width: 800px; max-width: 95vw; padding: 20px; }
+        .video-modal video { width: 100%; border-radius: var(--radius-sm); background: #000; max-height: 60vh; }
+        .video-info { margin-top: 12px; color: var(--text-secondary); font-size: 13px; }
+        /* Empty State */
+        .empty-state { text-align: center; padding: 48px; color: var(--text-secondary); }
+        .empty-state .icon { font-size: 48px; margin-bottom: 12px; opacity: 0.4; }
+        /* File size formatting */
+        .mono { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 12px; }
+        /* Stats Row */
+        .stats-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; margin-bottom: 24px; }
+        .stat-card {
+            background: var(--bg-card); border: 1px solid var(--border);
+            border-radius: var(--radius); padding: 18px 20px;
+        }
+        .stat-card .stat-value { font-size: 28px; font-weight: 700; color: var(--accent); }
+        .stat-card .stat-label { color: var(--text-secondary); font-size: 13px; margin-top: 4px; }
+        /* Toast */
+        .toast {
+            position: fixed; top: 20px; right: 20px; z-index: 200;
+            padding: 12px 20px; border-radius: var(--radius-sm); font-size: 14px;
+            opacity: 0; transform: translateY(-10px); transition: all .3s;
+            pointer-events: none;
+        }
+        .toast.show { opacity: 1; transform: translateY(0); }
+        .toast.success { background: rgba(52,211,153,0.9); color: #000; }
+        .toast.error { background: rgba(248,113,113,0.9); color: #fff; }
+        /* Responsive */
+        @media (max-width: 768px) {
+            .stats-row { grid-template-columns: repeat(2, 1fr); }
+            .login-card { width: 90%; padding: 32px 24px; }
+        }
+    </style>
+</head>
+<body>
+
+<!-- ==================== 登录页 ==================== -->
+<div class="login-container" id="loginPage">
+    <div class="login-card">
+        <h1>🎬 流媒体录制</h1>
+        <p class="subtitle">SRS / Nginx-RTMP 自动录制管理系统</p>
+        <!-- 第一步：用户名密码 -->
+        <div id="loginStep1">
+            <label>用户名</label>
+            <input type="text" id="loginUser" placeholder="请输入用户名" autocomplete="username">
+            <label>密码</label>
+            <input type="password" id="loginPass" placeholder="请输入密码" autocomplete="current-password">
+            <button class="btn" onclick="doLogin()">登 录</button>
+            <p class="login-error" id="loginError"></p>
+        </div>
+        <!-- 第二步：TOTP 验证码 -->
+        <div id="loginStep2" style="display:none;">
+            <p style="text-align:center;color:var(--green);margin-bottom:16px;">✅ 密码验证通过，请输入 TOTP 验证码</p>
+            <label>TOTP 动态验证码</label>
+            <input type="text" id="loginTotp" placeholder="6 位数字" maxlength="6" autocomplete="one-time-code">
+            <button class="btn" onclick="doLoginTotp()">验证</button>
+            <p class="login-error" id="loginTotpError"></p>
+            <p style="text-align:center;margin-top:8px;"><a href="#" onclick="resetLogin()" style="color:var(--text-secondary);font-size:13px;">返回上一步</a></p>
+        </div>
+    </div>
+</div>
+
+<!-- ==================== 主界面 ==================== -->
+<div class="app" id="app">
+
+    <!-- 顶部栏 -->
+    <div class="topbar">
+        <div class="topbar-left">
+            <span class="logo">🎬 流媒体录制系统</span>
+            <span class="polling-badge off" id="pollingBadge">
+                <span class="polling-dot"></span>
+                <span id="pollingStatusText">未启动</span>
+            </span>
+        </div>
+        <div class="topbar-right">
+            <span style="color:var(--text-secondary);font-size:13px;" id="currentUser"></span>
+            <button class="btn-sm" onclick="doLogout()">退出登录</button>
+        </div>
+    </div>
+
+    <!-- 标签页 -->
+    <div class="tabs">
+        <button class="tab active" onclick="switchTab('dashboard')">📊 仪表盘</button>
+        <button class="tab" onclick="switchTab('sources')">🔗 流源管理</button>
+        <button class="tab" onclick="switchTab('status')">📡 实时状态</button>
+        <button class="tab" onclick="switchTab('recordings')">📁 录制文件</button>
+        <button class="tab" onclick="switchTab('subscriptions')">🔴 RTMP 订阅</button>
+        <button class="tab" onclick="switchTab('settings')">⚙️ 系统设置</button>
+    </div>
+
+    <!-- 内容区 -->
+    <div class="content">
+
+        <!-- 仪表盘 -->
+        <div class="tab-content active" id="tab-dashboard">
+            <div class="stats-row" id="statsRow">
+                <div class="stat-card"><div class="stat-value" id="statSources">-</div><div class="stat-label">API流源</div></div>
+                <div class="stat-card"><div class="stat-value" id="statSubs">-</div><div class="stat-label">RTMP订阅</div></div>
+                <div class="stat-card"><div class="stat-value" id="statActive">-</div><div class="stat-label">活跃直播流</div></div>
+                <div class="stat-card"><div class="stat-value" id="statRecording">-</div><div class="stat-label">正在录制</div></div>
+                <div class="stat-card"><div class="stat-value" id="statFiles">-</div><div class="stat-label">录制文件数</div></div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h3>当前活跃流</h3>
+                    <button class="btn-sm primary" onclick="refreshStatus()">刷新</button>
+                </div>
+                <div id="dashboardStreams"><div class="empty-state"><div class="icon">📡</div><p>暂无活跃流</p></div></div>
+            </div>
+        </div>
+
+        <!-- 流源管理 -->
+        <div class="tab-content" id="tab-sources">
+            <div class="card">
+                <div class="card-header">
+                    <h3>流源列表</h3>
+                    <button class="btn-sm primary" onclick="openSourceModal()">+ 添加流源</button>
+                </div>
+                <table>
+                    <thead><tr><th>名称</th><th>类型</th><th>API 地址</th><th>RTMP 基地址</th><th>操作</th></tr></thead>
+                    <tbody id="sourcesTableBody"></tbody>
+                </table>
+                <div id="sourcesEmpty" class="empty-state" style="display:none;"><div class="icon">🔗</div><p>还没有配置流源，点击"添加流源"开始</p></div>
+            </div>
+        </div>
+
+        <!-- RTMP 直接订阅 -->
+        <div class="tab-content" id="tab-subscriptions">
+            <div class="card">
+                <div class="card-header">
+                    <h3>RTMP/RTMPS 直接订阅列表</h3>
+                    <button class="btn-sm primary" onclick="openSubModal()">+ 添加订阅</button>
+                </div>
+                <p style="color:var(--text-secondary);font-size:12px;margin-bottom:14px;">每个地址 = 一个独立流任务。录制期间自动暂停该流轮询，流停止后自动恢复轮询。</p>
+                <table>
+                    <thead><tr><th>状态</th><th>备注</th><th>RTMP 地址</th><th>轮询间隔</th><th>时段</th><th>录制</th><th>操作</th></tr></thead>
+                    <tbody id="subsTableBody"></tbody>
+                </table>
+                <div id="subsEmpty" class="empty-state" style="display:none;"><div class="icon">🔴</div><p>还没有 RTMP 订阅，点击"添加订阅"开始</p></div>
+            </div>
+        </div>
+
+        <!-- 实时状态 -->
+        <div class="tab-content" id="tab-status">
+            <div class="card">
+                <div class="card-header">
+                    <h3>实时流状态</h3>
+                    <button class="btn-sm primary" onclick="refreshStatus()">🔄 刷新</button>
+                </div>
+                <table>
+                    <thead><tr><th>状态</th><th>流源</th><th>流名称</th><th>分辨率</th><th>视频编码</th><th>客户端数</th><th>录制中</th></tr></thead>
+                    <tbody id="statusTableBody"></tbody>
+                </table>
+                <div id="statusEmpty" class="empty-state"><div class="icon">📡</div><p>暂无数据，请点击刷新或确保流源在线</p></div>
+            </div>
+        </div>
+
+        <!-- 录制文件 -->
+        <div class="tab-content" id="tab-recordings">
+            <div class="card">
+                <div class="card-header">
+                    <h3>录制文件列表</h3>
+                    <button class="btn-sm primary" onclick="loadRecordings()">🔄 刷新</button>
+                </div>
+                <table>
+                    <thead><tr><th>文件名</th><th>大小</th><th>创建时间</th><th>状态</th><th>操作</th></tr></thead>
+                    <tbody id="recordingsTableBody"></tbody>
+                </table>
+                <div id="recordingsEmpty" class="empty-state" style="display:none;"><div class="icon">📁</div><p>还没有录制文件</p></div>
+            </div>
+        </div>
+
+        <!-- 系统设置 -->
+        <div class="tab-content" id="tab-settings">
+            <div class="card">
+                <div class="card-header"><h3>🔐 认证设置</h3></div>
+                <label>用户名</label>
+                <input type="text" id="settingUser" placeholder="用户名">
+                <label>新密码</label>
+                <input type="password" id="settingPass" placeholder="新密码（留空不修改）">
+                <button class="btn-sm primary" onclick="updateAuth()" style="margin-top:12px;">保存认证</button>
+            </div>
+            <div class="card">
+                <div class="card-header"><h3>🛡️ 零信任安全</h3></div>
+                <div style="margin-bottom:16px;">
+                    <span style="color:var(--text-secondary);">当前 IP: </span>
+                    <strong class="mono" id="securityIp">加载中...</strong>
+                </div>
+                <div style="margin-bottom:16px;">
+                    <span style="color:var(--text-secondary);">TOTP 二次验证: </span>
+                    <span id="totpStatus">加载中...</span>
+                </div>
+                <div id="totpSetup" style="display:none;">
+                    <hr style="border-color:var(--border);margin:12px 0;">
+                    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">
+                        请使用 Google Authenticator / Microsoft Authenticator 扫描二维码，然后输入验证码确认启用。
+                    </p>
+                    <div style="text-align:center;margin:12px 0;">
+                        <img id="totpQr" style="background:#fff;padding:8px;border-radius:6px;max-width:180px;">
+                    </div>
+                    <p class="mono" style="font-size:11px;color:var(--text-secondary);word-break:break-all;">密钥: <span id="totpSecret"></span></p>
+                    <label>输入 TOTP 验证码确认</label>
+                    <input type="text" id="totpVerifyCode" placeholder="6 位数字" maxlength="6">
+                    <button class="btn-sm primary" onclick="verifyTotp()">确认启用</button>
+                </div>
+                <div id="totpEnabledDiv" style="display:none;">
+                    <button class="btn-sm danger" onclick="showDisableTotp()">禁用 TOTP</button>
+                    <div id="totpDisableForm" style="display:none;margin-top:12px;">
+                        <input type="text" id="totpDisableCode" placeholder="输入 TOTP 验证码以确认" maxlength="6" style="width:200px;display:inline-block;margin-right:8px;">
+                        <button class="btn-sm danger" onclick="disableTotp()">确认禁用</button>
+                    </div>
+                </div>
+                <button class="btn-sm primary" id="totpSetupBtn" onclick="setupTotp()" style="margin-top:8px;">设置 TOTP 二次验证</button>
+                <hr style="border-color:var(--border);margin:12px 0;">
+                <p style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">
+                    封禁策略: <span id="banPolicy"></span>
+                </p>
+                <div id="bannedIpsList"></div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h3>💻 系统配置</h3></div>
+                <label>Web 端口（修改后需重启生效）</label>
+                <div style="display:flex;gap:8px;">
+                    <input type="number" id="settingWebPort" min="1024" max="65535" placeholder="5000" style="flex:1;">
+                    <button class="btn-sm primary" onclick="updateWebPort()">保存</button>
+                </div>
+                <p style="font-size:11px;color:var(--text-secondary);margin:4px 0 16px 0;">
+                    优先级: 命令行 --port > 此设置 > 默认 5000
+                </p>
+                <label>录制文件保存目录</label>
+                <div style="display:flex;gap:8px;margin-bottom:8px;">
+                    <input type="text" id="settingRecDir" placeholder="./recordings" style="flex:1;" readonly>
+                    <button class="btn-sm primary" onclick="testRecDir()">测试</button>
+                </div>
+                <!-- 文件夹浏览器 -->
+                <div id="folderBrowser" style="display:none;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;max-height:260px;overflow-y:auto;margin-bottom:8px;">
+                    <div id="folderBreadcrumbs" style="font-size:12px;margin-bottom:8px;color:var(--text-secondary);"></div>
+                    <div id="folderList"></div>
+                </div>
+                <button class="btn-sm" onclick="openFolderBrowser()">📁 浏览文件夹</button>
+                <button class="btn-sm primary" onclick="saveRecDir()" style="margin-left:8px;">保存目录</button>
+                <div id="recDirTestResult" style="font-size:12px;margin-top:6px;"></div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h3>轮询设置</h3></div>
+                <label>轮询间隔（秒）</label>
+                <input type="number" id="settingInterval" min="3" max="300" placeholder="轮询间隔">
+                <button class="btn-sm primary" onclick="updateInterval()" style="margin-top:12px;">保存间隔</button>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<!-- ==================== 流源编辑弹窗 ==================== -->
+<div class="modal-overlay" id="sourceModal">
+    <div class="modal">
+        <h3 id="sourceModalTitle">添加流源</h3>
+        <input type="hidden" id="sourceEditId" value="-1">
+        <label>流源名称</label>
+        <input type="text" id="sourceName" placeholder="例如：生产环境 SRS">
+        <label>类型</label>
+        <select id="sourceType">
+            <option value="srs">SRS (Simple Realtime Server)</option>
+            <option value="nginx-rtmp">Nginx-RTMP</option>
+        </select>
+        <label>API 地址</label>
+        <input type="text" id="sourceApiUrl" placeholder="SRS: http://ip:1985/api/v1/streams  |  Nginx: http://ip:8080/stat">
+        <label>RTMP 基地址（用于拼接录制源）</label>
+        <input type="text" id="sourceRtmpBase" placeholder="例如：rtmp://192.168.1.100/live/">
+        <div class="btn-row">
+            <button class="btn-sm" onclick="closeSourceModal()">取消</button>
+            <button class="btn-sm primary" onclick="saveSource()">保存</button>
+        </div>
+    </div>
+</div>
+
+<!-- ==================== RTMP 订阅弹窗 ==================== -->
+<div class="modal-overlay" id="subModal">
+    <div class="modal">
+        <h3 id="subModalTitle">添加 RTMP 订阅</h3>
+        <input type="hidden" id="subEditId" value="-1">
+        <label>RTMP/RTMPS 地址 <span style="color:var(--red)">*</span></label>
+        <input type="text" id="subUrl" placeholder="rtmp://192.168.1.100/live/cam1 或 rtmps://...">
+        <label>备注（体现在文件名中）</label>
+        <input type="text" id="subRemarks" placeholder="例如：前门摄像头">
+        <label>轮询开始时间（留空 = 全天）</label>
+        <input type="text" id="subPollStart" placeholder="例如：08:00">
+        <label>轮询结束时间（留空 = 全天）</label>
+        <input type="text" id="subPollEnd" placeholder="例如：22:00">
+        <label>探测超时（秒）</label>
+        <input type="number" id="subProbeTimeout" value="5" min="1" max="30">
+        <label>轮询间隔（秒，留空使用全局间隔）</label>
+        <input type="number" id="subPollInterval" placeholder="留空则使用全局间隔" min="1" max="3600">
+        <label style="display:flex;align-items:center;gap:8px;">
+            <input type="checkbox" id="subEnabled" checked style="width:auto;margin:0;"> 启用此订阅
+        </label>
+        <hr style="border-color:var(--border);margin:12px 0;">
+        <p style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">⚡ 专用脚本钩子（Shell命令，支持变量如 {stream_name} {filename} {start_time}）</p>
+        <label>录制开始时执行 (on_start)</label>
+        <input type="text" id="subHookStart" placeholder="例如: curl -X POST http://api/notify?stream={stream_name}&action=start">
+        <label>录制停止时执行 (on_stop)</label>
+        <input type="text" id="subHookStop" placeholder="例如: python /path/to/upload.py --file {output_file}">
+        <p style="font-size:11px;color:var(--text-secondary);margin-top:-8px;">留空则使用全局脚本；配置后全局脚本不再执行。</p>
+        <div class="btn-row" style="margin-top:12px;">
+            <button class="btn-sm" onclick="closeSubModal()">取消</button>
+            <button class="btn-sm primary" onclick="saveSub()">保存</button>
+        </div>
+    </div>
+</div>
+
+<!-- ==================== 视频播放弹窗 ==================== -->
+<div class="modal-overlay video-modal" id="videoModal">
+    <div class="modal">
+        <h3 id="videoTitle">视频播放</h3>
+        <video id="videoPlayer" controls autoplay></video>
+        <div class="video-info" id="videoInfo"></div>
+        <div class="btn-row" style="margin-top:12px;">
+            <button class="btn-sm" onclick="closeVideo()">关闭</button>
+        </div>
+    </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ==================== 全局状态 ====================
+let currentTab = 'dashboard';
+let refreshTimer = null;
+
+// ==================== 工具函数 ====================
+function showToast(msg, type = 'success') {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = `toast ${type} show`;
+    setTimeout(() => { t.className = 'toast'; }, 2500);
+}
+
+async function api(method, url, body = null) {
+    const opts = { method, headers: {} };
+    if (body) {
+        opts.headers['Content-Type'] = 'application/json';
+        opts.body = JSON.stringify(body);
+    }
+    const resp = await fetch(url, opts);
+    if (resp.status === 401) {
+        document.getElementById('loginPage').style.display = 'flex';
+        document.getElementById('app').classList.remove('active');
+        document.cookie = 'token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
+        throw new Error('未登录');
+    }
+    if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ detail: '请求失败' }));
+        throw new Error(err.detail || '请求失败');
+    }
+    return resp.json();
+}
+
+function formatSize(bytes) {
+    if (!bytes) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let i = 0, v = bytes;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return v.toFixed(i === 0 ? 0 : 2) + ' ' + units[i];
+}
+
+function formatTime(iso) {
+    if (!iso) return '-';
+    const d = new Date(iso);
+    return d.toLocaleString('zh-CN');
+}
+
+// ==================== 认证 ====================
+async function checkAuth() {
+    try {
+        const resp = await fetch('/api/check_auth');
+        const data = await resp.json();
+        return data.authenticated;
+    } catch { return false; }
+}
+
+async function doLogin() {
+    const user = document.getElementById('loginUser').value.trim();
+    const pass = document.getElementById('loginPass').value.trim();
+    const errEl = document.getElementById('loginError');
+    errEl.style.display = 'none';
+
+    try {
+        const data = await api('POST', '/api/login', { username: user, password: pass });
+        if (data.require_totp) {
+            // 需要 TOTP 二次验证
+            document.getElementById('loginStep1').style.display = 'none';
+            document.getElementById('loginStep2').style.display = 'block';
+            document.getElementById('loginTotp').focus();
+            return;
+        }
+        finishLogin(data);
+    } catch (e) {
+        errEl.textContent = e.message;
+        errEl.style.display = 'block';
+    }
+}
+
+async function doLoginTotp() {
+    const user = document.getElementById('loginUser').value.trim();
+    const pass = document.getElementById('loginPass').value.trim();
+    const totp = document.getElementById('loginTotp').value.trim();
+    const errEl = document.getElementById('loginTotpError');
+    errEl.style.display = 'none';
+
+    try {
+        const data = await api('POST', '/api/login', { username: user, password: pass, totp_code: totp });
+        finishLogin(data);
+    } catch (e) {
+        errEl.textContent = e.message;
+        errEl.style.display = 'block';
+    }
+}
+
+function resetLogin() {
+    document.getElementById('loginStep1').style.display = 'block';
+    document.getElementById('loginStep2').style.display = 'none';
+    document.getElementById('loginTotp').value = '';
+}
+
+function finishLogin(data) {
+    document.getElementById('loginPage').style.display = 'none';
+    document.getElementById('app').classList.add('active');
+    document.getElementById('currentUser').textContent = data.username;
+    document.getElementById('loginStep1').style.display = 'block';
+    document.getElementById('loginStep2').style.display = 'none';
+    document.getElementById('loginTotp').value = '';
+    document.getElementById('loginError').style.display = 'none';
+    initApp();
+}
+
+async function doLogout() {
+    await fetch('/api/logout');
+    document.getElementById('loginPage').style.display = 'flex';
+    document.getElementById('app').classList.remove('active');
+    if (refreshTimer) clearInterval(refreshTimer);
+}
+
+// 回车登录
+document.getElementById('loginPass').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') doLogin();
+});
+document.getElementById('loginTotp').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') doLoginTotp();
+});
+
+// ==================== 标签页切换 ====================
+function switchTab(name) {
+    currentTab = name;
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    // 激活对应的标签按钮
+    document.querySelectorAll('.tab').forEach(t => {
+        if (t.textContent.includes({dashboard:'仪表盘',sources:'流源管理',subscriptions:'RTMP 订阅',status:'实时状态',recordings:'录制文件',settings:'系统设置'}[name])) {
+            t.classList.add('active');
+        }
+    });
+    document.getElementById('tab-' + name).classList.add('active');
+
+    if (name === 'dashboard') loadDashboard();
+    else if (name === 'sources') loadSources();
+    else if (name === 'subscriptions') loadSubscriptions();
+    else if (name === 'status') refreshStatus();
+    else if (name === 'recordings') loadRecordings();
+    else if (name === 'settings') loadSettings();
+}
+
+// ==================== 仪表盘 ====================
+async function loadDashboard() {
+    try {
+        const [pollingData, statusData, recordingsData, sourcesData, subsData] = await Promise.all([
+            api('GET', '/api/polling/status'),
+            api('GET', '/api/streams/status'),
+            api('GET', '/api/recordings'),
+            api('GET', '/api/sources'),
+            api('GET', '/api/subscriptions'),
+        ]);
+
+        document.getElementById('statSources').textContent = sourcesData.sources.length;
+        document.getElementById('statSubs').textContent = subsData.subscriptions.length;
+        document.getElementById('statActive').textContent = statusData.streams.filter(s => s.active).length;
+        document.getElementById('statRecording').textContent = pollingData.active_recordings;
+        document.getElementById('statFiles').textContent = recordingsData.total;
+
+        const container = document.getElementById('dashboardStreams');
+        const active = statusData.streams.filter(s => s.active);
+        if (active.length === 0) {
+            container.innerHTML = '<div class="empty-state"><div class="icon">📡</div><p>暂无活跃流</p></div>';
+        } else {
+            container.innerHTML = `
+                <table>
+                    <thead><tr><th>流源</th><th>流名称</th><th>分辨率</th><th>编码</th><th>客户端</th><th>录制中</th></tr></thead>
+                    <tbody>${active.map(s => `
+                        <tr>
+                            <td>${escHtml(s.source_name)}</td>
+                            <td>${escHtml(s.stream_name)}</td>
+                            <td>${escHtml(s.resolution)}</td>
+                            <td>${escHtml(s.video_codec)}</td>
+                            <td>${s.clients}</td>
+                            <td>${s.is_recording ? '<span class="badge srs">录制中</span>' : '<span style="color:var(--text-secondary)">等待中</span>'}</td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table>`;
+        }
+    } catch (e) { console.error(e); }
+}
+
+// ==================== 流源管理 ====================
+async function loadSources() {
+    try {
+        const data = await api('GET', '/api/sources');
+        const tbody = document.getElementById('sourcesTableBody');
+        const empty = document.getElementById('sourcesEmpty');
+
+        if (data.sources.length === 0) {
+            tbody.innerHTML = '';
+            empty.style.display = 'block';
+        } else {
+            empty.style.display = 'none';
+            tbody.innerHTML = data.sources.map((s, i) => `
+                <tr>
+                    <td><strong>${escHtml(s.name)}</strong></td>
+                    <td><span class="badge ${s.type === 'nginx-rtmp' ? 'nginx' : 'srs'}">${s.type}</span></td>
+                    <td class="mono" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(s.api_url)}">${escHtml(s.api_url)}</td>
+                    <td class="mono">${escHtml(s.rtmp_base || '-')}</td>
+                    <td>
+                        <button class="btn-sm" onclick="editSource(${i})">编辑</button>
+                        <button class="btn-sm danger" onclick="deleteSource(${i})">删除</button>
+                    </td>
+                </tr>`).join('');
+        }
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+function openSourceModal(editId = -1) {
+    document.getElementById('sourceEditId').value = editId;
+    if (editId >= 0) {
+        document.getElementById('sourceModalTitle').textContent = '编辑流源';
+        // 预填数据由 editSource 处理
+    } else {
+        document.getElementById('sourceModalTitle').textContent = '添加流源';
+        document.getElementById('sourceName').value = '';
+        document.getElementById('sourceType').value = 'srs';
+        document.getElementById('sourceApiUrl').value = '';
+        document.getElementById('sourceRtmpBase').value = '';
+    }
+    document.getElementById('sourceModal').classList.add('active');
+}
+
+function closeSourceModal() {
+    document.getElementById('sourceModal').classList.remove('active');
+}
+
+async function editSource(id) {
+    const data = await api('GET', '/api/sources');
+    const s = data.sources[id];
+    document.getElementById('sourceEditId').value = id;
+    document.getElementById('sourceName').value = s.name;
+    document.getElementById('sourceType').value = s.type;
+    document.getElementById('sourceApiUrl').value = s.api_url;
+    document.getElementById('sourceRtmpBase').value = s.rtmp_base || '';
+    document.getElementById('sourceModalTitle').textContent = '编辑流源';
+    document.getElementById('sourceModal').classList.add('active');
+}
+
+async function saveSource() {
+    const id = parseInt(document.getElementById('sourceEditId').value);
+    const body = {
+        name: document.getElementById('sourceName').value.trim(),
+        type: document.getElementById('sourceType').value,
+        api_url: document.getElementById('sourceApiUrl').value.trim(),
+        rtmp_base: document.getElementById('sourceRtmpBase').value.trim(),
+    };
+    if (!body.name) { showToast('请输入流源名称', 'error'); return; }
+    if (!body.api_url) { showToast('请输入 API 地址', 'error'); return; }
+
+    try {
+        if (id >= 0) {
+            await api('PUT', `/api/sources/${id}`, body);
+        } else {
+            await api('POST', '/api/sources', body);
+        }
+        closeSourceModal();
+        loadSources();
+        showToast('保存成功');
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function deleteSource(id) {
+    if (!confirm('确定删除该流源吗？')) return;
+    try {
+        await api('DELETE', `/api/sources/${id}`);
+        loadSources();
+        showToast('已删除');
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+// ==================== RTMP 直接订阅管理 ====================
+async function loadSubscriptions() {
+    try {
+        const data = await api('GET', '/api/subscriptions');
+        const tbody = document.getElementById('subsTableBody');
+        const empty = document.getElementById('subsEmpty');
+
+        if (data.subscriptions.length === 0) {
+            tbody.innerHTML = '';
+            empty.style.display = 'block';
+        } else {
+            empty.style.display = 'none';
+            tbody.innerHTML = data.subscriptions.map((s, i) => `
+                <tr>
+                    <td>
+                        <span class="status-dot ${s.is_recording ? 'green' : s.is_online ? 'green' : 'red'}"></span>
+                        ${s.is_recording ? '<strong>录制中</strong>' : s.is_online ? '在线' : '离线'}
+                        ${!s.enabled ? '<span class="badge" style="background:rgba(248,113,113,0.15);color:var(--red);margin-left:4px;">已禁用</span>' : ''}
+                        ${s.is_paused ? '<span class="badge" style="background:rgba(251,191,36,0.15);color:var(--yellow);margin-left:4px;">轮询暂停</span>' : ''}
+                    </td>
+                    <td><strong>${escHtml(s.remarks || '-')}</strong></td>
+                    <td class="mono" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(s.url)}">${escHtml(s.url)}</td>
+                    <td>${s.poll_interval ? s.poll_interval + 's' : '<span style="color:var(--text-secondary)">全局</span>'}</td>
+                    <td>
+                        ${s.poll_start || s.poll_end
+                            ? `${s.poll_start || '00:00'} ~ ${s.poll_end || '24:00'}`
+                            : '<span style="color:var(--text-secondary)">全天</span>'}
+                        ${s.in_poll_window && s.enabled
+                            ? '<span class="badge srs" style="margin-left:4px;">在窗口内</span>'
+                            : (s.enabled ? '<span class="badge" style="background:rgba(251,191,36,0.15);color:var(--yellow);margin-left:4px;">窗口外</span>' : '')}
+                    </td>
+                    <td>
+                        ${s.is_recording
+                            ? `<span class="badge srs">录制中 (${formatTime(s.recording_started)})</span>`
+                            : '<span style="color:var(--text-secondary)">-</span>'}
+                    </td>
+                    <td>
+                        <button class="btn-sm" onclick="probeSub(${i})">探测</button>
+                        <button class="btn-sm" onclick="editSub(${i})">编辑</button>
+                        <button class="btn-sm danger" onclick="deleteSub(${i})">删除</button>
+                    </td>
+                </tr>`).join('');
+        }
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+function openSubModal(editId = -1) {
+    document.getElementById('subEditId').value = editId;
+    if (editId >= 0) {
+        document.getElementById('subModalTitle').textContent = '编辑 RTMP 订阅';
+    } else {
+        document.getElementById('subModalTitle').textContent = '添加 RTMP 订阅';
+        document.getElementById('subUrl').value = '';
+        document.getElementById('subRemarks').value = '';
+        document.getElementById('subPollStart').value = '';
+        document.getElementById('subPollEnd').value = '';
+        document.getElementById('subPollInterval').value = '';
+        document.getElementById('subProbeTimeout').value = '5';
+        document.getElementById('subEnabled').checked = true;
+        document.getElementById('subHookStart').value = '';
+        document.getElementById('subHookStop').value = '';
+    }
+    document.getElementById('subModal').classList.add('active');
+}
+
+function closeSubModal() {
+    document.getElementById('subModal').classList.remove('active');
+}
+
+async function editSub(id) {
+    const data = await api('GET', '/api/subscriptions');
+    const s = data.subscriptions[id];
+    document.getElementById('subEditId').value = id;
+    document.getElementById('subUrl').value = s.url;
+    document.getElementById('subRemarks').value = s.remarks || '';
+    document.getElementById('subPollStart').value = s.poll_start || '';
+    document.getElementById('subPollEnd').value = s.poll_end || '';
+    document.getElementById('subPollInterval').value = s.poll_interval || '';
+    document.getElementById('subProbeTimeout').value = s.probe_timeout || 5;
+    document.getElementById('subEnabled').checked = s.enabled !== false;
+    document.getElementById('subHookStart').value = (s.hooks && s.hooks.on_start) || '';
+    document.getElementById('subHookStop').value = (s.hooks && s.hooks.on_stop) || '';
+    document.getElementById('subModalTitle').textContent = '编辑 RTMP 订阅';
+    document.getElementById('subModal').classList.add('active');
+}
+
+async function saveSub() {
+    const id = parseInt(document.getElementById('subEditId').value);
+    const body = {
+        url: document.getElementById('subUrl').value.trim(),
+        remarks: document.getElementById('subRemarks').value.trim(),
+        poll_start: document.getElementById('subPollStart').value.trim(),
+        poll_end: document.getElementById('subPollEnd').value.trim(),
+        poll_interval: parseInt(document.getElementById('subPollInterval').value) || null,
+        probe_timeout: parseInt(document.getElementById('subProbeTimeout').value) || 5,
+        enabled: document.getElementById('subEnabled').checked,
+        hooks: {
+            on_start: document.getElementById('subHookStart').value.trim(),
+            on_stop: document.getElementById('subHookStop').value.trim(),
+        },
+    };
+    if (!body.url) { showToast('请输入 RTMP 地址', 'error'); return; }
+    if (!body.url.startsWith('rtmp://') && !body.url.startsWith('rtmps://')) {
+        showToast('地址必须以 rtmp:// 或 rtmps:// 开头', 'error'); return;
+    }
+
+    try {
+        if (id >= 0) {
+            await api('PUT', `/api/subscriptions/${id}`, body);
+        } else {
+            await api('POST', '/api/subscriptions', body);
+        }
+        closeSubModal();
+        loadSubscriptions();
+        showToast('保存成功');
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function deleteSub(id) {
+    if (!confirm('确定删除该 RTMP 订阅吗？')) return;
+    try {
+        await api('DELETE', `/api/subscriptions/${id}`);
+        loadSubscriptions();
+        showToast('已删除');
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function probeSub(id) {
+    try {
+        const data = await api('POST', `/api/subscriptions/${id}/probe`);
+        if (data.online) {
+            showToast(`流在线 - 编码: ${data.details.video_codec}, 分辨率: ${data.details.resolution}`, 'success');
+        } else {
+            showToast('流不在线或无法访问', 'error');
+        }
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+// ==================== 实时状态 ====================
+async function refreshStatus() {
+    try {
+        const data = await api('GET', '/api/streams/status');
+        const tbody = document.getElementById('statusTableBody');
+        const empty = document.getElementById('statusEmpty');
+
+        if (data.streams.length === 0) {
+            tbody.innerHTML = '';
+            empty.style.display = 'block';
+        } else {
+            empty.style.display = 'none';
+            tbody.innerHTML = data.streams.map(s => `
+                <tr>
+                    <td><span class="status-dot ${s.active ? 'green' : 'red'}"></span>${s.active ? '在线' : '离线'}</td>
+                    <td>${escHtml(s.source_name)}</td>
+                    <td>${escHtml(s.stream_name)}</td>
+                    <td>${escHtml(s.resolution || '-')}</td>
+                    <td>${escHtml(s.video_codec || '-')}</td>
+                    <td>${s.clients ?? '-'}</td>
+                    <td>${s.is_recording ? '<span class="badge srs">录制中</span>' : '<span style="color:var(--text-secondary)">-</span>'}</td>
+                </tr>`).join('');
+        }
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+// ==================== 录制文件 ====================
+async function loadRecordings() {
+    try {
+        const data = await api('GET', '/api/recordings');
+        const tbody = document.getElementById('recordingsTableBody');
+        const empty = document.getElementById('recordingsEmpty');
+
+        if (data.files.length === 0) {
+            tbody.innerHTML = '';
+            empty.style.display = 'block';
+        } else {
+            empty.style.display = 'none';
+            tbody.innerHTML = data.files.map(f => `
+                <tr>
+                    <td class="mono" title="${escHtml(f.filename)}">${escHtml(f.filename)}</td>
+                    <td>${formatSize(f.size_bytes)}</td>
+                    <td>${formatTime(f.created_at)}</td>
+                    <td>${f.is_recording ? '<span class="badge srs">录制中</span>' : '<span style="color:var(--green)">已完成</span>'}</td>
+                    <td>
+                        <button class="btn-sm" onclick="playVideo('${escAttr(f.filename)}')">▶ 播放</button>
+                        ${f.is_recording ? '' : `<button class="btn-sm danger" onclick="deleteRecording('${escAttr(f.filename)}')">删除</button>`}
+                    </td>
+                </tr>`).join('');
+        }
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+function playVideo(filename) {
+    document.getElementById('videoTitle').textContent = filename;
+    const player = document.getElementById('videoPlayer');
+    player.src = `/api/video/${encodeURIComponent(filename)}`;
+    document.getElementById('videoInfo').textContent = `文件: ${filename}`;
+    document.getElementById('videoModal').classList.add('active');
+}
+
+function closeVideo() {
+    const player = document.getElementById('videoPlayer');
+    player.pause();
+    player.src = '';
+    document.getElementById('videoModal').classList.remove('active');
+}
+
+async function deleteRecording(filename) {
+    if (!confirm(`确定删除文件 "${filename}" 吗？此操作不可撤销。`)) return;
+    try {
+        await api('DELETE', `/api/recordings/${encodeURIComponent(filename)}`);
+        loadRecordings();
+        showToast('已删除');
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+// ==================== 设置 ====================
+async function loadSettings() {
+    try {
+        const data = await api('GET', '/api/polling/status');
+        document.getElementById('settingInterval').value = data.interval;
+    } catch (e) {}
+    try {
+        const cfg = await api('GET', '/api/config');
+        document.getElementById('settingWebPort').value = cfg.port;
+        document.getElementById('settingRecDir').value = cfg.recording_dir;
+    } catch (e) {}
+    loadSecurityStatus();
+}
+
+async function updateWebPort() {
+    const port = parseInt(document.getElementById('settingWebPort').value);
+    if (!port || port < 1024 || port > 65535) { showToast('端口范围: 1024-65535', 'error'); return; }
+    try {
+        await api('PUT', '/api/config/port', { port });
+        showToast('端口已保存，重启服务后生效');
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+// ==================== 文件夹浏览器 ====================
+let folderCurrentPath = '/';
+
+async function openFolderBrowser() {
+    document.getElementById('folderBrowser').style.display = 'block';
+    await browseFolder(document.getElementById('settingRecDir').value || '.');
+}
+
+async function browseFolder(path) {
+    folderCurrentPath = path;
+    try {
+        const data = await api('GET', `/api/filesystem/browse?path=${encodeURIComponent(path)}`);
+        // 面包屑
+        const bc = document.getElementById('folderBreadcrumbs');
+        bc.innerHTML = data.breadcrumbs.map((b, i) =>
+            `<a href="#" onclick="browseFolder('${escAttr(b.path)}');return false;" style="color:var(--accent);">${escHtml(b.name)}</a>` +
+            (i < data.breadcrumbs.length - 1 ? ' / ' : '')
+        ).join('');
+
+        // 目录列表
+        const list = document.getElementById('folderList');
+        if (data.parent && data.parent !== data.current) {
+            list.innerHTML = `<div style="padding:4px 8px;cursor:pointer;color:var(--accent);" onclick="browseFolder('${escAttr(data.parent)}')">📁 .. (上级目录)</div>`;
+        } else {
+            list.innerHTML = '';
+        }
+        list.innerHTML += data.items.map(item =>
+            `<div style="padding:4px 8px;cursor:pointer;border-radius:4px;" 
+                  onclick="selectFolder('${escAttr(item.path)}')"
+                  onmouseover="this.style.background='rgba(79,140,255,0.1)'" 
+                  onmouseout="this.style.background=''">
+                📁 ${escHtml(item.name)}
+             </div>`
+        ).join('');
+
+        // 也允许手动输入路径
+        document.getElementById('settingRecDir').value = data.current;
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+function selectFolder(path) {
+    document.getElementById('settingRecDir').value = path;
+    browseFolder(path);
+}
+
+async function testRecDir() {
+    const path = document.getElementById('settingRecDir').value.trim();
+    if (!path) { showToast('请输入目录路径', 'error'); return; }
+    const resultEl = document.getElementById('recDirTestResult');
+    try {
+        const data = await api('POST', '/api/filesystem/test', { path });
+        if (data.writable) {
+            resultEl.innerHTML = `<span style="color:var(--green);">✅ 目录可读写 — ${escHtml(data.path)}</span>`;
+        } else if (data.readable) {
+            resultEl.innerHTML = `<span style="color:var(--yellow);">⚠️ 可读但不可写 — ${escHtml(data.path)}</span>`;
+        } else {
+            resultEl.innerHTML = `<span style="color:var(--red);">❌ 无法访问 — ${escHtml(data.error || data.path)}</span>`;
+        }
+    } catch (e) {
+        resultEl.innerHTML = `<span style="color:var(--red);">❌ ${escHtml(e.message)}</span>`;
+    }
+}
+
+async function saveRecDir() {
+    const path = document.getElementById('settingRecDir').value.trim();
+    if (!path) { showToast('请输入目录路径', 'error'); return; }
+    try {
+        // 先测试
+        const test = await api('POST', '/api/filesystem/test', { path });
+        if (!test.writable) { showToast('目录不可写，请检查权限', 'error'); return; }
+        // 保存
+        await api('PUT', '/api/config/recording_dir', { path });
+        showToast('录制目录已保存');
+        document.getElementById('folderBrowser').style.display = 'none';
+        document.getElementById('recDirTestResult').innerHTML = '';
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function loadSecurityStatus() {
+    try {
+        const data = await api('GET', '/api/security/status');
+        document.getElementById('securityIp').textContent = data.current_ip;
+        document.getElementById('banPolicy').textContent =
+            `${data.max_attempts} 次失败后封禁 ${data.ban_duration} 分钟`;
+
+        // TOTP 状态
+        if (data.totp_enabled) {
+            document.getElementById('totpStatus').innerHTML = '<span class="badge srs">已启用</span>';
+            document.getElementById('totpSetupBtn').style.display = 'none';
+            document.getElementById('totpSetup').style.display = 'none';
+            document.getElementById('totpEnabledDiv').style.display = 'block';
+        } else {
+            document.getElementById('totpStatus').innerHTML = '<span style="color:var(--red)">未启用</span>';
+            document.getElementById('totpSetupBtn').style.display = 'inline-block';
+            document.getElementById('totpEnabledDiv').style.display = 'none';
+        }
+
+        // 封禁列表
+        const list = document.getElementById('bannedIpsList');
+        if (data.banned_ips.length === 0) {
+            list.innerHTML = '<p style="font-size:12px;color:var(--text-secondary);">暂无被封禁 IP</p>';
+        } else {
+            list.innerHTML = '<table><thead><tr><th>IP</th><th>失败次数</th><th>剩余时间</th><th>操作</th></tr></thead><tbody>' +
+                data.banned_ips.map(b => `
+                    <tr>
+                        <td class="mono">${escHtml(b.ip)} ${b.is_current ? '<span class="badge" style="background:rgba(248,113,113,0.15);color:var(--red);">当前IP</span>' : ''}</td>
+                        <td>${b.attempts}</td>
+                        <td>${Math.floor(b.remaining_seconds / 60)} 分 ${b.remaining_seconds % 60} 秒</td>
+                        <td><button class="btn-sm" onclick="unbanIp('${escAttr(b.ip)}')">解封</button></td>
+                    </tr>`).join('') +
+                '</tbody></table>';
+        }
+    } catch (e) {}
+}
+
+async function setupTotp() {
+    try {
+        const data = await api('POST', '/api/security/totp/setup');
+        document.getElementById('totpQr').src = 'data:image/png;base64,' + data.qr_base64;
+        document.getElementById('totpSecret').textContent = data.secret;
+        document.getElementById('totpSetup').style.display = 'block';
+        document.getElementById('totpSetupBtn').style.display = 'none';
+        document.getElementById('totpVerifyCode').value = '';
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function verifyTotp() {
+    const code = document.getElementById('totpVerifyCode').value.trim();
+    if (!code || code.length !== 6) { showToast('请输入 6 位验证码', 'error'); return; }
+    try {
+        await api('POST', '/api/security/totp/verify', { code });
+        showToast('TOTP 二次验证已启用！下次登录将需要验证码');
+        document.getElementById('totpSetup').style.display = 'none';
+        loadSecurityStatus();
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+function showDisableTotp() {
+    document.getElementById('totpDisableForm').style.display = 'block';
+    document.getElementById('totpDisableCode').value = '';
+}
+
+async function disableTotp() {
+    const code = document.getElementById('totpDisableCode').value.trim();
+    if (!code) { showToast('请输入 TOTP 验证码', 'error'); return; }
+    try {
+        await api('POST', '/api/security/totp/disable', { code });
+        showToast('TOTP 已禁用');
+        document.getElementById('totpDisableForm').style.display = 'none';
+        loadSecurityStatus();
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function unbanIp(ip) {
+    try {
+        await api('POST', '/api/security/unban', { ip });
+        showToast(`IP ${ip} 已解封`);
+        loadSecurityStatus();
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function updateAuth() {
+    const user = document.getElementById('settingUser').value.trim();
+    const pass = document.getElementById('settingPass').value.trim();
+    if (!user && !pass) { showToast('请至少输入一项', 'error'); return; }
+    const body = {};
+    if (user) body.username = user;
+    if (pass) body.password = pass;
+    try {
+        await api('PUT', '/api/config/auth', body);
+        showToast('认证信息已更新');
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function updateInterval() {
+    const interval = parseInt(document.getElementById('settingInterval').value);
+    if (!interval || interval < 3) { showToast('间隔不能小于 3 秒', 'error'); return; }
+    try {
+        await api('PUT', '/api/polling/interval', { interval });
+        showToast('轮询间隔已更新');
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+// ==================== 轮询状态刷新 ====================
+async function refreshPollingStatus() {
+    try {
+        const data = await api('GET', '/api/polling/status');
+        const badge = document.getElementById('pollingBadge');
+        const text = document.getElementById('pollingStatusText');
+        if (data.running) {
+            badge.className = 'polling-badge on';
+            text.textContent = `运行中 · 录制 ${data.active_recordings} 个流`;
+        } else {
+            badge.className = 'polling-badge off';
+            text.textContent = '未启动';
+        }
+    } catch (e) {}
+}
+
+// ==================== 转义 ====================
+function escHtml(s) {
+    if (!s) return '';
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escAttr(s) {
+    if (!s) return '';
+    return s.replace(/'/g,"\\'").replace(/"/g,'&quot;');
+}
+
+// ==================== 初始化 ====================
+async function initApp() {
+    loadDashboard();
+    refreshPollingStatus();
+    // 每 5 秒刷新轮询状态
+    refreshTimer = setInterval(() => {
+        refreshPollingStatus();
+        if (currentTab === 'dashboard') loadDashboard();
+        if (currentTab === 'status') refreshStatus();
+    }, 5000);
+}
+
+// 页面加载：检查登录状态
+(async function() {
+    const authed = await checkAuth();
+    if (authed) {
+        document.getElementById('loginPage').style.display = 'none';
+        document.getElementById('app').classList.add('active');
+        initApp();
+    }
+})();
+</script>
+
+</body>
+</html>
